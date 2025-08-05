@@ -11,6 +11,7 @@ This package enables the building and saving of Stuart Games projects in a consi
 1. The directory you are working with must have the correct env keys listed below.
 
 ```
+USER_ID your user id with edit perms
 PUBLISH_KEY the key used for publishing
 DOWNLOAD_KEY the key used for generating a download link from roblox
 PLACE_ID the id of the place we are trying to publish

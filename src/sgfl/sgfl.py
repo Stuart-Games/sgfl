@@ -7,6 +7,8 @@ from .operations import *
 def start(
     task: Annotated[str, typer.Argument(help="The (start/save) task to perform")] = "",
 ):
+    
+    
     PLACE_FILE_PATH = getFileURI("Place.rbxlx")
 
     #env variables
@@ -15,12 +17,13 @@ def start(
     universeId = getEnvSafe("UNIVERSE_ID")
     publishKey = getEnvSafe("PUBLISH_KEY")
     downloadKey = getEnvSafe("DOWNLOAD_KEY")
+    userId = getEnvSafe("USER_ID")
 
     start = task == "start"
     save = task == "save"
 
     if start:
-        startPlace(placeId,universeId,publishKey,PLACE_FILE_PATH)
+        startPlace(userId,placeId,universeId,publishKey,PLACE_FILE_PATH)
     elif save:
         savePlace(placeId,downloadKey,PLACE_FILE_PATH)
     else:

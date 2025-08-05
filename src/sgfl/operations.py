@@ -5,7 +5,7 @@ from sys import platform
 from .luauScripts import build,importAssets
 from .util import *
 
-def startPlace(placeId:str,universeId:str,publishKey:str,placeFilePath:str):
+def startPlace(userId:str,placeId:str,universeId:str,publishKey:str,placeFilePath:str):
     #pull and build
     subprocess.run(["git", "pull"])
     subprocess.run(["lune","run","-"],input=build,text=True)
@@ -22,11 +22,13 @@ def startPlace(placeId:str,universeId:str,publishKey:str,placeFilePath:str):
     if res.status_code != 200:
         print(res.text)
 
+    placeOpenString=f"roblox-studio:1+userId:{userId}+task:EditPlace+placeId:{placeId}+universeId:{universeId}"
+
     #open studio (generic window)
     if platform == "win32": #windows (any ver)
-        subprocess.run(["start", "roblox-studio:1"], shell=True)
+        subprocess.run(["start", placeOpenString], shell=True)
     elif platform == "darwin": #macos
-        subprocess.run(["open", "roblox-studio:1"])
+        subprocess.run(["open", placeOpenString])
 
     deleteFile(placeFilePath)
     deleteFile("sourcemap.json")
