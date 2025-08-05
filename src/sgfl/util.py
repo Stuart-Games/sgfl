@@ -1,6 +1,4 @@
 from pathlib import Path
-from sys import platform
-import subprocess
 import os
 
 def getFileURI(name: str)->str:
@@ -14,8 +12,5 @@ def getEnvSafe(key:str)->str:
     return val
 
 def deleteFile(path:str):
-    if platform == "win32": #windows (any ver)
-        subprocess.run(["del","Q", path])
-    elif platform == "darwin": #macos
-        subprocess.run(["rm",path])
+    os.remove(path)
     
