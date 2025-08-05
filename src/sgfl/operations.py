@@ -26,6 +26,7 @@ def startPlace(placeId:str,universeId:str,publishKey:str,placeFilePath:str):
         subprocess.run(["open", "roblox-studio:1"])
 
     deleteFile(placeFilePath)
+    deleteFile("sourcemap.json")
 
     subprocess.run(["code", "."], shell=True)
     subprocess.run(["rojo", "serve"])
@@ -51,4 +52,5 @@ def savePlace(placeId:str,downloadKey:str,placeFilePath:str):
     subprocess.run(["lune", "run","-"],input=importAssets,text=True)
 
     deleteFile(placeFilePath)
+    deleteFile("sourcemap.json")
     print("Wrote place data to the local file system.")
