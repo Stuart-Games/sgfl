@@ -47,4 +47,4 @@ local gameData =
 local game = roblox.deserializePlace(gameData)
 
 local file = roblox.serializePlace(game)
-fs.writeFile("./WaterPhysics.rbxlx", file)
+fs.writeFile("./Place.rbxlx", file)

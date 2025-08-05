@@ -1,25 +1,22 @@
-import os
 import subprocess
 import requests
-from dotenv import load_dotenv
 from sys import platform
-from pathlib import Path
+import util
 
-load_dotenv()
-cwd = Path.cwd()
-PLACE_FILE_PATH = str(cwd) + "/WaterPhysics.rbxlx"
+
+PLACE_FILE_PATH = util.getFileURI("WaterPhysics")
 #pull and build
 subprocess.run(["git", "pull"])
 subprocess.run(["lune", "run","tools/build"])
 
 #environment variables
-placeId = os.getenv("PLACE_ID")
-universeId = os.getenv("UNIVERSE_ID")
-publishKey = os.getenv("PUBLISH_KEY")
+placeId = util.getEnvSafe("PUBLISH_KEY")
+universeId = util.getEnvSafe("UNIVERSE_ID")
+publishKey = util.getEnvSafe("PUBLISH_KEY")
 
 #make correct publish req to roblox
 url = f'https://apis.roblox.com/universes/v1/{universeId}/places/{placeId}/versions?versionType=Published'
-headers = {"x-api-key":publishKey,"Content-Type":"application/xml"}
+headers:dict[str,str] = {"x-api-key":publishKey,"Content-Type":"application/xml"}
 
 f = open(PLACE_FILE_PATH,'rb') 
 bin = f.read()

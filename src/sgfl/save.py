@@ -1,18 +1,13 @@
-import os
 import subprocess
 import requests
-from dotenv import load_dotenv
-from sys import platform
-from pathlib import Path
 import json
+import util
 
-load_dotenv()
-cwd = Path.cwd()
-PLACE_FILE_PATH = str(cwd) + "/WaterPhysics.rbxlx"
+PLACE_FILE_PATH = util.getFileURI("WaterPhysics")
 
 #environment variables
-downloadKey = os.getenv("DOWNLOAD_KEY")
-placeId = os.getenv("PLACE_ID")
+downloadKey = util.getEnvSafe("DOWNLOAD_KEY")
+placeId = util.getEnvSafe("PLACE_ID")
 
 #make correct publish req to roblox
 url = f'https://apis.roblox.com/asset-delivery-api/v1/assetId/{placeId}'
