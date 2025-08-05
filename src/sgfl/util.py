@@ -1,8 +1,7 @@
 from pathlib import Path
-from dotenv import load_dotenv
+from sys import platform
+import subprocess
 import os
-
-load_dotenv()
 
 def getFileURI(name: str)->str:
     cwd = Path.cwd()
@@ -14,4 +13,9 @@ def getEnvSafe(key:str)->str:
         raise Exception(f'Could not find {key} in root .env')
     return val
 
+def deleteFile(path:str):
+    if platform == "win32": #windows (any ver)
+        subprocess.run(["del","Q", path])
+    elif platform == "darwin": #macos
+        subprocess.run(["rm",path])
     
