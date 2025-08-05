@@ -17,7 +17,10 @@ def startPlace(placeId:str,universeId:str,publishKey:str,placeFilePath:str):
     with open(placeFilePath,'rb') as f:
         bin = f.read()
 
-    requests.post(url,headers=headers,data=bin)
+    res = requests.post(url,headers=headers,data=bin)
+
+    if res.status_code != 200:
+        print(res.text)
 
     #open studio (generic window)
     if platform == "win32": #windows (any ver)
@@ -26,7 +29,7 @@ def startPlace(placeId:str,universeId:str,publishKey:str,placeFilePath:str):
         subprocess.run(["open", "roblox-studio:1"])
 
     deleteFile(placeFilePath)
-
+    deleteFile("sourcemap.json")
     subprocess.run(["code", "."], shell=True)
     subprocess.run(["rojo", "serve"])
 
@@ -51,4 +54,5 @@ def savePlace(placeId:str,downloadKey:str,placeFilePath:str):
     subprocess.run(["lune", "run","-"],input=importAssets,text=True)
 
     deleteFile(placeFilePath)
+    deleteFile("sourcemap.json")
     print("Wrote place data to the local file system.")

@@ -12,5 +12,6 @@ def getEnvSafe(key:str)->str:
     return val
 
 def deleteFile(path:str):
-    os.remove(path)
+    if os.path.exists(path):
+        os.remove(path)
     
