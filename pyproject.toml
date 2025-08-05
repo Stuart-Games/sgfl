@@ -2,6 +2,9 @@
 requires = ["hatchling >= 1.26"]
 build-backend = "hatchling.build"
 
+[project.scripts]
+sgfl = "sgfl.cli:app"
+
 [project]
 name = "sgfl"
 version = "0.0.1"
