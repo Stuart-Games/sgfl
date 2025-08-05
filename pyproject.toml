@@ -6,6 +6,7 @@ build-backend = "hatchling.build"
 sgfl = "sgfl.cli:app"
 
 [project]
+dependencies = ["typer", "requests", "dotenv", "django>2.0; os_name == 'nt'"]
 name = "sgfl"
 version = "0.0.1"
 authors = [{ name = "tms2202" }]
