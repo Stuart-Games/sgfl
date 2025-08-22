@@ -19,6 +19,3 @@ classifiers = [
 ]
 license = "MIT"
 license-files = ["LICEN[CS]E*"]
-
-[project.entry-points."pipx.run"]
-sgfl = "sgfl.cli:app"

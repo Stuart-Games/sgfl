@@ -11,10 +11,6 @@ def start(
     if not task:
         print("Incorrect usage, run sgfl --help to see all commands.")
         return
-
-    
-    if pull:
-        print("P ENABLE")
     
     PLACE_FILE_PATH = getFileURI("Place.rbxlx")
 
