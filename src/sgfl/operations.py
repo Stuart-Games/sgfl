@@ -5,9 +5,11 @@ from sys import platform
 from .luauScripts import build,importAssets
 from .util import *
 
-def startPlace(userId:str,placeId:str,universeId:str,publishKey:str,placeFilePath:str):
+def startPlace(userId:str,placeId:str,universeId:str,publishKey:str,placeFilePath:str,pull:bool):
     #pull and build
-    subprocess.run(["git", "pull"])
+    if pull:
+        subprocess.run(["git", "pull"])
+        
     subprocess.run(["lune","run","-"],input=build,text=True)
 
     #make correct publish req to roblox

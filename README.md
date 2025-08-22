@@ -20,14 +20,18 @@ UNIVERSE_ID the id of the experience we are trying to pubish
 
 ## Installation
 
-run the command `pipx install git+https://github.com/devvf/sgfl.git`
+run the command `pipx install git+https://github.com/devvf/sgfl.git`.
 
 ## Commands
 
+A full list of commands can be found by running `sgfl --help`.
+
 ### To Save
 
-run the command `sgfl save`
+run the command `sgfl save`.
 
 ### To Start
 
-run the command `sgfl start`
+`-p` can be added before start to pull files from the relevant repository.
+
+run the command `sgfl start`.

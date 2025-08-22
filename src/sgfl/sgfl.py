@@ -5,9 +5,16 @@ from .util import *
 from .operations import *
 
 def start(
-    task: Annotated[str, typer.Argument(help="The (start/save) task to perform")] = "",
+    pull: Annotated[bool,typer.Option("--pull","-p",help="Whether to git pull on start.")] = False,
+    task: Annotated[str, typer.Argument(help="The (start/save) task to perform.")] = None,
 ):
+    if not task:
+        print("Incorrect usage, run sgfl --help to see all commands.")
+        return
+
     
+    if pull:
+        print("P ENABLE")
     
     PLACE_FILE_PATH = getFileURI("Place.rbxlx")
 
@@ -23,7 +30,7 @@ def start(
     save = task == "save"
 
     if start:
-        startPlace(userId,placeId,universeId,publishKey,PLACE_FILE_PATH)
+        startPlace(userId,placeId,universeId,publishKey,PLACE_FILE_PATH,pull)
     elif save:
         savePlace(placeId,downloadKey,PLACE_FILE_PATH)
     else:
