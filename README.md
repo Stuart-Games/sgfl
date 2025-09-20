@@ -18,9 +18,32 @@ PLACE_ID the id of the place we are trying to publish
 UNIVERSE_ID the id of the experience we are trying to pubish
 ```
 
+An `assets.json` file is now required in the root directory to specify the saving of assets.
+
+Example structure:
+
+```
+{
+    "Materials": {
+        "folder":"assets",
+        "robloxPath":"MaterialService"
+    },
+    "ServerSignals": {
+        "folder":"assets",
+        "robloxPath":"ServerStorage.Signals"
+    }
+}
+```
+
+NB: There is support for direct service read/write and subfolder read/write but not both for the same service. In the example above you can see we save a specific folder in ServerStorage but all of MaterialService. We would not, in this case, be able to save all of ServerStorage to one file lest we have duplication in the file system.
+
 ## Installation
 
 run the command `pipx install git+https://github.com/devvf/sgfl.git`.
+
+## Upgrading
+
+run the command `pipx upgrade sgfl` to update to the newest version if available.
 
 ## Commands
 
