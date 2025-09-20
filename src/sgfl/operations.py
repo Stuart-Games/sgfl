@@ -2,21 +2,25 @@ import json
 import subprocess
 import requests
 from sys import platform
-from .luauScripts import build,importAssets
 from .util import *
 
-def startPlace(userId:str,placeId:str,universeId:str,publishKey:str,placeFilePath:str,pull:bool):
+def startPlace(pull:bool):
+    placeId = getEnvSafe("PLACE_ID")
+    universeId = getEnvSafe("UNIVERSE_ID")
+    publishKey = getEnvSafe("PUBLISH_KEY")
+    userId = getEnvSafe("USER_ID")
+
     #pull and build
     if pull:
         subprocess.run(["git", "pull"])
-        
-    subprocess.run(["lune","run","-"],input=build,text=True)
+
+    runLuauFile("build.luau")
 
     #make correct publish req to roblox
     url = f'https://apis.roblox.com/universes/v1/{universeId}/places/{placeId}/versions?versionType=Published'
     headers = {"x-api-key":publishKey,"Content-Type":"application/xml"}
 
-    with open(placeFilePath,'rb') as f:
+    with open(PLACE_FILE_PATH,'rb') as f:
         bin = f.read()
 
     res = requests.post(url,headers=headers,data=bin)
@@ -32,12 +36,16 @@ def startPlace(userId:str,placeId:str,universeId:str,publishKey:str,placeFilePat
     elif platform == "darwin": #macos
         subprocess.run(["open", placeOpenString])
 
-    deleteFile(placeFilePath)
+    deleteFile(PLACE_FILE_PATH)
     deleteFile("sourcemap.json")
     subprocess.run(["code", "."], shell=True)
     subprocess.run(["rojo", "serve"])
 
-def savePlace(placeId:str,downloadKey:str,placeFilePath:str):
+def savePlace():
+    placeId = getEnvSafe("PLACE_ID")
+    downloadKey = getEnvSafe("DOWNLOAD_KEY")
+
+
     #make correct publish req to roblox
     url = f'https://apis.roblox.com/asset-delivery-api/v1/assetId/{placeId}'
     headers = {"x-api-key":downloadKey}
@@ -52,11 +60,11 @@ def savePlace(placeId:str,downloadKey:str,placeFilePath:str):
     placeData = requests.get(downloadUrl).content
 
     #write to place file
-    with open(placeFilePath,'wb') as f:
+    with open(PLACE_FILE_PATH,'wb') as f:
         f.write(placeData)
 
-    subprocess.run(["lune", "run","-"],input=importAssets,text=True)
+    runLuauFile("importAssets.luau")
 
-    deleteFile(placeFilePath)
+    deleteFile(PLACE_FILE_PATH)
     deleteFile("sourcemap.json")
     print("Wrote place data to the local file system.")
