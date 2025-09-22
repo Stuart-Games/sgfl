@@ -1,6 +1,11 @@
 local roblox = require("@lune/roblox")
 local fs = require("@lune/fs")
 local serde = require("@lune/serde")
+local process = require("@lune/process")
+
+local module = require("./module")
+print(module.Hello)
+
 local Instance = roblox.Instance
 
 type TableType = {
@@ -29,7 +34,8 @@ function readFileToParent(filePath: string, parent: Instance)
 	end
 end
 
-local json: TableType = serde.decode("json", fs.readFile("assets.json"))
+local filePath = if fs.isFile("assets.json") then "assets.json" else process.args[1]
+local json: TableType = serde.decode("json", fs.readFile(filePath))
 
 local serviceInstances = {}
 

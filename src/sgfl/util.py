@@ -11,8 +11,10 @@ def getAbsoluteFileURI(name:str)->str:
     return os.path.join(BASE_DIR,name)
 
 def runLuauFile(name:str):
-    with open(getAbsoluteFileURI(name)) as file:
-        subprocess.run(["lune", "run","-"],input=file.read(),text=True)
+    fileURI = getAbsoluteFileURI(name)
+    jsonPath = getAbsoluteFileURI("json/default.assets.json")
+    modulePath = getAbsoluteFileURI("lua/module.luau")
+    subprocess.run(["lune","run",fileURI,jsonPath,modulePath])
 
 def getEnvSafe(key:str)->str:
     val = os.getenv(key)

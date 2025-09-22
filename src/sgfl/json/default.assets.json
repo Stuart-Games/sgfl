@@ -1,0 +1,42 @@
+{
+    "Materials": {
+        "folder":"assets",
+        "robloxPath":"MaterialService"
+    },
+    "Workspace": {
+        "folder":"map",
+        "robloxPath":"Workspace"
+    },
+    "StarterGui": {
+        "folder":"gui",
+        "robloxPath":"StarterGui"
+    },
+    "Lighting": {
+        "folder":"map",
+        "robloxPath":"Lighting"
+    },
+    "RemoteSignals": {
+        "folder":"assets",
+        "robloxPath":"ReplicatedStorage.RemoteSignals"
+    },
+    "ReplicatedSignals": {
+        "folder":"assets",
+        "robloxPath":"ReplicatedStorage.Signals"
+    },
+    "ReplicatedAssets": {
+        "folder":"assets",
+        "robloxPath":"ReplicatedStorage.Assets"
+    },
+    "ServerAssets": {
+        "folder":"assets",
+        "robloxPath":"ServerStorage.Assets"
+    },
+    "ServerSignals": {
+        "folder":"assets",
+        "robloxPath":"ServerStorage.Signals"
+    },
+    "StyleSheets": {
+        "folder":"assets",
+        "robloxPath":"ReplicatedStorage.StyleSheets"
+    }
+}

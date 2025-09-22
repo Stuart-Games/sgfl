@@ -1,6 +1,7 @@
 local roblox = require("@lune/roblox")
 local fs = require("@lune/fs")
 local serde = require("@lune/serde")
+local process = require("@lune/process")
 
 type TableType = {
 	[string]: {
@@ -12,18 +13,14 @@ type TableType = {
 local content = fs.readFile("Place.rbxlx")
 local game = roblox.deserializePlace(content)
 
---[[
-	The camera is destroyed for two reasons:
-
-	1. Camera pos and focus can cause merge conflicts
-	2. Lune build creates a new camera anyways
-]]
+--Destroy camera to avoid merge conflict as it is regenerated anyway
 local camera = game.Workspace:FindFirstChild("Camera") :: Camera?
 if camera then
 	camera:Destroy()
 end
 
-local json: TableType = serde.decode("json", fs.readFile("assets.json"))
+local filePath = if fs.isFile("assets.json") then "assets.json" else process.args[1]
+local json: TableType = serde.decode("json", fs.readFile(filePath))
 
 for fileName, data in json do
 	if not fs.isDir(data.folder) then
