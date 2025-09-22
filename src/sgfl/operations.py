@@ -14,7 +14,7 @@ def startPlace(pull:bool):
     if pull:
         subprocess.run(["git", "pull"])
 
-    runLuauFile("build.luau")
+    runLuauFile("lua/build.luau")
 
     #make correct publish req to roblox
     url = f'https://apis.roblox.com/universes/v1/{universeId}/places/{placeId}/versions?versionType=Published'
@@ -63,7 +63,7 @@ def savePlace():
     with open(PLACE_FILE_PATH,'wb') as f:
         f.write(placeData)
 
-    runLuauFile("importAssets.luau")
+    runLuauFile("lua/importAssets.luau")
 
     deleteFile(PLACE_FILE_PATH)
     deleteFile("sourcemap.json")
