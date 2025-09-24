@@ -26,20 +26,20 @@ def startPlace(pull:bool):
     res = requests.post(url,headers=headers,data=bin)
 
     if res.status_code != 200:
-        print(res.text)
+        print(f"{color.BOLD}ERROR{color.END} {res.status_code}: Please fill out the {color.BOLD}.env{color.END} file.")
+    else:
+        placeOpenString=f"roblox-studio:1+userId:{userId}+task:EditPlace+placeId:{placeId}+universeId:{universeId}"
 
-    placeOpenString=f"roblox-studio:1+userId:{userId}+task:EditPlace+placeId:{placeId}+universeId:{universeId}"
+        #open studio (generic window)
+        if platform == "win32": #windows (any ver)
+            subprocess.run(["start", placeOpenString], shell=True)
+        elif platform == "darwin": #macos
+            subprocess.run(["open", placeOpenString])
 
-    #open studio (generic window)
-    if platform == "win32": #windows (any ver)
-        subprocess.run(["start", placeOpenString], shell=True)
-    elif platform == "darwin": #macos
-        subprocess.run(["open", placeOpenString])
-
-    deleteFile(PLACE_FILE_PATH)
-    deleteFile("sourcemap.json")
-    subprocess.run(["code", "."], shell=True)
-    subprocess.run(["rojo", "serve"])
+        deleteFile(PLACE_FILE_PATH)
+        deleteFile("sourcemap.json")
+        subprocess.run(["code", "."], shell=True)
+        subprocess.run(["rojo", "serve"])
 
 def savePlace():
     placeId = getEnvSafe("PLACE_ID")
@@ -67,8 +67,8 @@ def savePlace():
 
     deleteFile(PLACE_FILE_PATH)
     deleteFile("sourcemap.json")
-    print("Wrote place data to the local file system.")
-
+    print(f"{color.BOLD}Saved place data{color.END} to the local file system.")
+    
 def initPlace():
     createDirIfNotExist("src")
     createDirIfNotExist("src/client")
@@ -112,7 +112,7 @@ def initPlace():
     runSilentSubprocess(["rokit", "add","rojo"])
     runSilentSubprocess(["rokit","install"])
 
-    print("🌊 Created new sgfl instance - to get started run sgfl start!")
+    print(f"🌊 {color.BOLD}Created{color.END} new sgfl instance - to get started run {color.BOLD}sgfl start{color.END}!")
 
 
 

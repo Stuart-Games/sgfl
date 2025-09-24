@@ -18,11 +18,6 @@
                     "$path": "src/client"
                 }
             }
-        },
-        "ReplicatedFirst": {
-            "Scripts": {
-                "$path": "src/client/ReplicatedFirst"
-            }
         }
     }
 }
