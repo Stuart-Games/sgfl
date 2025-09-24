@@ -1,5 +1,6 @@
 local roblox = require("@lune/roblox")
 local fs = require("@lune/fs")
+local shared = require("./shared")
 
 local content = fs.readFile("Place.rbxlx")
 local game = roblox.deserializePlace(content)
