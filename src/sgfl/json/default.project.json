@@ -1,0 +1,28 @@
+{
+    "name": "Change Place Name In Project Json",
+    "tree": {
+        "$className": "DataModel",
+        "ReplicatedStorage": {
+            "Shared": {
+                "$path": "src/shared"
+            }
+        },
+        "ServerScriptService": {
+            "Server": {
+                "$path": "src/server"
+            }
+        },
+        "StarterPlayer": {
+            "StarterPlayerScripts": {
+                "Client": {
+                    "$path": "src/client"
+                }
+            }
+        },
+        "ReplicatedFirst": {
+            "Scripts": {
+                "$path": "src/client/ReplicatedFirst"
+            }
+        }
+    }
+}
