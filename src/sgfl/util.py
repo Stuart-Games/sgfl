@@ -1,5 +1,6 @@
 from pathlib import Path
 import os
+import json
 import subprocess
 
 def getFileURI(name: str)->str:
@@ -12,9 +13,21 @@ def getAbsoluteFileURI(name:str)->str:
 
 def runLuauFile(name:str):
     fileURI = getAbsoluteFileURI(name)
-    jsonPath = getAbsoluteFileURI("")
-    modulePath = getAbsoluteFileURI("lua/module.luau")
-    subprocess.run(["lune","run",fileURI,jsonPath,modulePath])
+    absolutePath = getAbsoluteFileURI("")
+    subprocess.run(["lune","run",fileURI,absolutePath])
+
+def runSilentSubprocess(arr:list[str]):
+    subprocess.run(arr,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+
+
+def getTableFromJsonFile(filePath:str):
+    with open(getAbsoluteFileURI(filePath),'r') as f: 
+        table = json.load(f)
+        return table
+
+def createDirIfNotExist(dirName:str):
+    if not os.path.isdir(dirName):
+        os.mkdir(dirName)
 
 def getEnvSafe(key:str)->str:
     val = os.getenv(key)
