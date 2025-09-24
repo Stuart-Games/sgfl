@@ -12,7 +12,7 @@ def getAbsoluteFileURI(name:str)->str:
 
 def runLuauFile(name:str):
     fileURI = getAbsoluteFileURI(name)
-    jsonPath = getAbsoluteFileURI("json/default.assets.json")
+    jsonPath = getAbsoluteFileURI("")
     modulePath = getAbsoluteFileURI("lua/module.luau")
     subprocess.run(["lune","run",fileURI,jsonPath,modulePath])
 

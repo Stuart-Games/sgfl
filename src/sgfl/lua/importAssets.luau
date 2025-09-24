@@ -1,14 +1,5 @@
 local roblox = require("@lune/roblox")
 local fs = require("@lune/fs")
-local serde = require("@lune/serde")
-local process = require("@lune/process")
-
-type TableType = {
-	[string]: {
-		folder: string,
-		robloxPath: string,
-	},
-}
 
 local content = fs.readFile("Place.rbxlx")
 local game = roblox.deserializePlace(content)
@@ -19,10 +10,7 @@ if camera then
 	camera:Destroy()
 end
 
-local filePath = if fs.isFile("assets.json") then "assets.json" else process.args[1]
-local json: TableType = serde.decode("json", fs.readFile(filePath))
-
-for fileName, data in json do
+for fileName, data in shared.getAssetTreeJson() do
 	if not fs.isDir(data.folder) then
 		fs.writeDir(data.folder)
 	end

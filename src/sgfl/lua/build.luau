@@ -1,19 +1,8 @@
 local roblox = require("@lune/roblox")
 local fs = require("@lune/fs")
-local serde = require("@lune/serde")
-local process = require("@lune/process")
-
-local module = require("./module")
-print(module.Hello)
+local shared = require("./shared")
 
 local Instance = roblox.Instance
-
-type TableType = {
-	[string]: {
-		folder: string,
-		robloxPath: string,
-	},
-}
 
 function readAsset(filePath: string)
 	if fs.isFile(filePath) then
@@ -34,20 +23,19 @@ function readFileToParent(filePath: string, parent: Instance)
 	end
 end
 
-local filePath = if fs.isFile("assets.json") then "assets.json" else process.args[1]
-local json: TableType = serde.decode("json", fs.readFile(filePath))
-
 local serviceInstances = {}
 
 --parses services and folders within those services
-for fileName, data in json do
+for fileName, data in shared.getAssetTreeJson() do
 	local splitPath = data.robloxPath:split(".")
 	local directService = #splitPath == 1
 	local serviceName = splitPath[1]
 
 	--somethign like workspace where its thought of as a singular object
+	local file = shared.getRbxmxString(data.folder, fileName)
+
 	if directService then
-		local service = readAsset(`{data.folder}/{fileName}.rbxmx`)
+		local service = readAsset(file)
 		serviceInstances[serviceName] = service
 	else --subfolders of services
 		local service = serviceInstances[serviceName]
@@ -59,7 +47,7 @@ for fileName, data in json do
 		local folder = Instance.new("Folder")
 		folder.Name = splitPath[2]
 		folder.Parent = service
-		readFileToParent(`{data.folder}/{fileName}.rbxmx`, folder)
+		readFileToParent(file, folder)
 	end
 end
 
