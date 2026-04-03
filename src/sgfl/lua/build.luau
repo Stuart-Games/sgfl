@@ -6,7 +6,8 @@ local Instance = roblox.Instance
 
 function readAsset(filePath: string)
 	if fs.isFile(filePath) then
-		local asset = roblox.deserializeModel(fs.readFile(filePath))[1]
+		local modelFile = fs.readFile(filePath)
+		local asset = roblox.deserializeModel(modelFile)[1]
 		return asset
 	end
 
