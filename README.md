@@ -53,8 +53,12 @@ A full list of commands can be found by running `sgfl --help`.
 
 run the command `sgfl save`.
 
+To include detailed `.env`, API key, HTTP request, and build/runtime diagnostics when errors occur, run `sgfl -d save`.
+
 ### To Start
 
 `-p` can be added before start to pull files from the relevant repository.
 
 run the command `sgfl start`.
+
+To include detailed `.env`, API key, HTTP request, and build/runtime diagnostics when errors occur, run `sgfl -d start`.

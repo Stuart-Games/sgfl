@@ -1,4 +1,6 @@
 import requests
+from urllib.parse import urlparse
+from typing import Optional
 from sys import platform
 from .util import *
 
@@ -24,6 +26,98 @@ def _responseReason(res: requests.Response) -> str:
         return text[:500]
 
     return "No additional response body was returned."
+
+
+def _clipText(text: str, maxChars: int = 600) -> str:
+    trimmed = text.strip()
+    if len(trimmed) <= maxChars:
+        return trimmed
+    return trimmed[:maxChars] + "\n...[response truncated]"
+
+
+def _httpDiagnostics(
+    *,
+    method: str,
+    url: str,
+    apiKeyName: str,
+    apiKey: str,
+    response: Optional[requests.Response] = None,
+    error: Optional[Exception] = None,
+) -> list[str]:
+    parsed = urlparse(url)
+    lines = [
+        f"request: {method} {url}",
+        f"endpoint host: {parsed.netloc}",
+        f"endpoint path: {parsed.path}",
+        f"auth: x-api-key set via {apiKeyName} (masked={maskSecret(apiKey)}, len={len(apiKey.strip())})",
+    ]
+
+    if error is not None:
+        lines.append(f"request error type: {type(error).__name__}")
+        lines.append(f"request error text: {error}")
+
+    if response is not None:
+        lines.append(f"status: {response.status_code}")
+        lines.append(f"reason: {response.reason or 'unknown'}")
+
+        contentType = response.headers.get("Content-Type", "missing")
+        lines.append(f"content-type: {contentType}")
+
+        try:
+            elapsedMs = int(response.elapsed.total_seconds() * 1000)
+            lines.append(f"latency: {elapsedMs}ms")
+        except Exception:
+            pass
+
+        interestingHeaderKeys = [
+            "x-request-id",
+            "x-correlation-id",
+            "x-trace-id",
+            "roblox-machine-id",
+            "roblox-id",
+            "x-roblox-region",
+        ]
+        for headerKey in interestingHeaderKeys:
+            if headerKey in response.headers:
+                lines.append(
+                    f"response header {headerKey}: {response.headers.get(headerKey)}"
+                )
+
+        try:
+            payload = response.json()
+            if isinstance(payload, dict):
+                lines.append(f"json keys: {', '.join(payload.keys())}")
+        except ValueError:
+            bodyPreview = _clipText(response.text)
+            if bodyPreview:
+                lines.append("response body preview:")
+                lines.extend([f"  {line}" for line in bodyPreview.splitlines()])
+
+    return lines
+
+
+def _withAuthorizationWarning(
+    baseSuggestions: list[str],
+    statusCode: int,
+    usesApiKey: bool = True,
+) -> list[str]:
+    if statusCode not in [401, 403]:
+        return baseSuggestions
+
+    warning = (
+        "Authorization issue detected (HTTP 401/403). "
+        "Your Roblox API key may have auto-expired; check your key status, scopes, and allowed IP settings in the Creator Dashboard. "
+        "Review the Roblox API key reference for required setup."
+    )
+
+    if not usesApiKey:
+        warning = (
+            "Authorization issue detected (HTTP 401/403). "
+            "The download URL may have expired; request a fresh URL and retry. "
+            "If this persists, also verify Roblox API key setup and scopes in the Creator Dashboard."
+        )
+
+    return [*baseSuggestions, warning]
 
 
 def startPlace(pull: bool):
@@ -77,17 +171,40 @@ def startPlace(pull: bool):
                 "Verify internet connectivity and try again.",
                 "Confirm your PLACE_ID, UNIVERSE_ID and PUBLISH_KEY values are valid.",
             ],
+            diagnostics={
+                "HTTP diagnostics": _httpDiagnostics(
+                    method="POST",
+                    url=url,
+                    apiKeyName="PUBLISH_KEY",
+                    apiKey=publishKey,
+                    error=exc,
+                )
+            },
         )
 
     if res.status_code != 200:
-        raise SGFLError(
-            "Roblox rejected the publish request.",
-            details=f"HTTP {res.status_code}: {_responseReason(res)}",
-            suggestions=[
+        suggestions = _withAuthorizationWarning(
+            [
                 "Confirm PLACE_ID and UNIVERSE_ID point to the correct place.",
                 "Regenerate your PUBLISH_KEY and ensure it has publish permissions.",
                 "Check that your account can edit the target place.",
             ],
+            res.status_code,
+            usesApiKey=True,
+        )
+        raise SGFLError(
+            "Roblox rejected the publish request.",
+            details=f"HTTP {res.status_code}: {_responseReason(res)}",
+            suggestions=suggestions,
+            diagnostics={
+                "HTTP diagnostics": _httpDiagnostics(
+                    method="POST",
+                    url=url,
+                    apiKeyName="PUBLISH_KEY",
+                    apiKey=publishKey,
+                    response=res,
+                )
+            },
         )
     else:
         placeOpenString = f"roblox-studio:1+userId:{userId}+task:EditPlace+placeId:{placeId}+universeId:{universeId}"
@@ -141,16 +258,39 @@ def savePlace():
                 "Verify internet connectivity and try again.",
                 "Confirm DOWNLOAD_KEY and PLACE_ID are valid.",
             ],
+            diagnostics={
+                "HTTP diagnostics": _httpDiagnostics(
+                    method="GET",
+                    url=url,
+                    apiKeyName="DOWNLOAD_KEY",
+                    apiKey=downloadKey,
+                    error=exc,
+                )
+            },
         )
 
     if res.status_code != 200:
-        raise SGFLError(
-            "Roblox did not return a download URL.",
-            details=f"HTTP {res.status_code}: {_responseReason(res)}",
-            suggestions=[
+        suggestions = _withAuthorizationWarning(
+            [
                 "Check DOWNLOAD_KEY permissions for asset delivery.",
                 "Ensure PLACE_ID refers to an accessible place.",
             ],
+            res.status_code,
+            usesApiKey=True,
+        )
+        raise SGFLError(
+            "Roblox did not return a download URL.",
+            details=f"HTTP {res.status_code}: {_responseReason(res)}",
+            suggestions=suggestions,
+            diagnostics={
+                "HTTP diagnostics": _httpDiagnostics(
+                    method="GET",
+                    url=url,
+                    apiKeyName="DOWNLOAD_KEY",
+                    apiKey=downloadKey,
+                    response=res,
+                )
+            },
         )
 
     try:
@@ -163,6 +303,15 @@ def savePlace():
                 "Retry the request in case of a temporary Roblox API issue.",
                 "Inspect API response manually to confirm the endpoint output.",
             ],
+            diagnostics={
+                "HTTP diagnostics": _httpDiagnostics(
+                    method="GET",
+                    url=url,
+                    apiKeyName="DOWNLOAD_KEY",
+                    apiKey=downloadKey,
+                    response=res,
+                )
+            },
         )
 
     downloadUrl = payload.get("location")
@@ -175,6 +324,15 @@ def savePlace():
                 "Verify DOWNLOAD_KEY has the right scope.",
                 "Confirm the place has a published version available.",
             ],
+            diagnostics={
+                "HTTP diagnostics": _httpDiagnostics(
+                    method="GET",
+                    url=url,
+                    apiKeyName="DOWNLOAD_KEY",
+                    apiKey=downloadKey,
+                    response=res,
+                )
+            },
         )
 
     announceStep("Downloading place file data.")
@@ -188,15 +346,34 @@ def savePlace():
                 "Retry the save command.",
                 "Check your network connection and VPN/proxy settings.",
             ],
+            diagnostics={
+                "HTTP diagnostics": [
+                    f"request: GET {downloadUrl}",
+                    f"request error type: {type(exc).__name__}",
+                    f"request error text: {exc}",
+                ]
+            },
         )
 
     if downloadRes.status_code != 200:
+        suggestions = _withAuthorizationWarning(
+            [
+                "Retry download, then inspect response details for permission or availability issues."
+            ],
+            downloadRes.status_code,
+            usesApiKey=False,
+        )
         raise SGFLError(
             "Place file download failed.",
             details=f"HTTP {downloadRes.status_code}: {_responseReason(downloadRes)}",
-            suggestions=[
-                "Retry download, then inspect response details for permission or availability issues."
-            ],
+            suggestions=suggestions,
+            diagnostics={
+                "HTTP diagnostics": [
+                    f"request: GET {downloadUrl}",
+                    f"status: {downloadRes.status_code}",
+                    f"content-type: {downloadRes.headers.get('Content-Type', 'missing')}",
+                ]
+            },
         )
 
     placeData = downloadRes.content

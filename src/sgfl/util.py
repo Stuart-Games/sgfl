@@ -3,6 +3,8 @@ import os
 import json
 import subprocess
 import shlex
+import sys
+import shutil
 from typing import Optional
 
 
@@ -28,6 +30,7 @@ class SGFLError(Exception):
         command: Optional[str] = None,
         stdout: Optional[str] = None,
         stderr: Optional[str] = None,
+        diagnostics: Optional[dict[str, list[str]]] = None,
     ):
         super().__init__(message)
         self.message = message
@@ -36,6 +39,116 @@ class SGFLError(Exception):
         self.command = command
         self.stdout = stdout
         self.stderr = stderr
+        self.diagnostics = diagnostics or {}
+
+
+API_ENV_KEYS = ["PUBLISH_KEY", "DOWNLOAD_KEY"]
+ID_ENV_KEYS = ["PLACE_ID", "UNIVERSE_ID", "USER_ID"]
+
+
+def maskSecret(value: str) -> str:
+    visibleChars = 4
+    if len(value) <= visibleChars * 2:
+        return "*" * len(value)
+    return f"{value[:visibleChars]}...{value[-visibleChars:]}"
+
+
+def _maskSecret(value: str) -> str:
+    return maskSecret(value)
+
+
+def _toolDiagnosticsForTask(taskName: Optional[str], pullEnabled: bool) -> list[str]:
+    requiredTools: list[str] = []
+
+    if taskName == "start":
+        requiredTools.extend(["lune", "rojo", "code"])
+        if pullEnabled:
+            requiredTools.append("git")
+    elif taskName == "save":
+        requiredTools.append("lune")
+    elif taskName == "init":
+        requiredTools.extend(["rokit"])
+
+    lines: list[str] = []
+    for tool in requiredTools:
+        path = shutil.which(tool)
+        if path:
+            lines.append(f"- tool {tool}: FOUND ({path})")
+        else:
+            lines.append(f"- tool {tool}: MISSING on PATH")
+
+    return lines
+
+
+def _runtimeDiagnosticsLines(taskName: Optional[str], pullEnabled: bool) -> list[str]:
+    lines = [
+        f"cwd: {Path.cwd()}",
+        f"platform: {sys.platform}",
+        f"python: {sys.version.split()[0]} ({sys.executable})",
+        f"assets.json present: {'yes' if os.path.exists(ASSET_CONFIG_FILE_PATH) else 'no'}",
+        f"Place.rbxlx present: {'yes' if os.path.exists(PLACE_FILE_PATH) else 'no'}",
+    ]
+
+    lines.extend(_toolDiagnosticsForTask(taskName, pullEnabled))
+    return lines
+
+
+def _getEnvDiagnosticsLines(keys: Optional[list[str]] = None) -> list[str]:
+    targetKeys = keys or [*ID_ENV_KEYS, *API_ENV_KEYS]
+    lines: list[str] = []
+
+    envPath = getFileURI(".env")
+    if os.path.exists(envPath):
+        lines.append(f".env file found at: {envPath}")
+    else:
+        lines.append(f".env file missing at: {envPath}")
+
+    for key in targetKeys:
+        rawValue = os.getenv(key)
+
+        if rawValue is None:
+            lines.append(f"- {key}: MISSING")
+            continue
+
+        value = rawValue
+        trimmed = value.strip()
+        notes: list[str] = []
+
+        if trimmed == "":
+            lines.append(f"- {key}: EMPTY")
+            continue
+
+        if value != trimmed:
+            notes.append("contains leading/trailing whitespace")
+
+        lowered = trimmed.lower()
+        placeholderTokens = [
+            "changeme",
+            "replace",
+            "your_",
+            "example",
+            "placeholder",
+            "none",
+            "null",
+        ]
+        if any(token in lowered for token in placeholderTokens):
+            notes.append("looks like a placeholder value")
+
+        if key in ID_ENV_KEYS and not trimmed.isdigit():
+            notes.append("should be numeric")
+
+        if key in API_ENV_KEYS and len(trimmed) < 16:
+            notes.append("looks unusually short for an API key")
+
+        displayValue = _maskSecret(trimmed) if key in API_ENV_KEYS else trimmed
+        details = f"value={displayValue} (len={len(trimmed)})"
+
+        if notes:
+            details = details + "; notes: " + "; ".join(notes)
+
+        lines.append(f"- {key}: SET, {details}")
+
+    return lines
 
 
 def announceStep(message: str):
@@ -86,6 +199,13 @@ def runCommand(
                 f"Install '{command[0]}' and ensure it is available on PATH.",
                 "Re-run the command after installation.",
             ],
+            diagnostics={
+                "Command diagnostics": [
+                    f"requested command: {_formatCommand(command)}",
+                    f"cwd: {Path.cwd()}",
+                    f"shell mode: {shell}",
+                ]
+            },
         )
     except OSError as exc:
         raise SGFLError(
@@ -93,9 +213,28 @@ def runCommand(
             details=str(exc),
             suggestions=suggestions
             or ["Verify your shell environment and PATH are configured correctly."],
+            diagnostics={
+                "Command diagnostics": [
+                    f"requested command: {_formatCommand(command)}",
+                    f"cwd: {Path.cwd()}",
+                    f"shell mode: {shell}",
+                ]
+            },
         )
 
     if result.returncode != 0:
+        commandDiagnostics = [
+            f"requested command: {_formatCommand(command)}",
+            f"cwd: {Path.cwd()}",
+            f"shell mode: {shell}",
+        ]
+        if step:
+            commandDiagnostics.append(f"step: {step}")
+
+        executablePath = shutil.which(command[0]) if command else None
+        if executablePath:
+            commandDiagnostics.append(f"resolved executable: {executablePath}")
+
         raise SGFLError(
             "External command failed.",
             details=f"Command exited with code {result.returncode}.",
@@ -104,12 +243,20 @@ def runCommand(
             command=_formatCommand(command),
             stdout=_clipOutput(result.stdout),
             stderr=_clipOutput(result.stderr),
+            diagnostics={"Command diagnostics": commandDiagnostics},
         )
 
     return result
 
 
-def printSgflError(err: SGFLError):
+def printSgflError(
+    err: SGFLError,
+    includeEnvDiagnostics: bool = False,
+    envDiagnosticKeys: Optional[list[str]] = None,
+    includeDetailedDiagnostics: bool = False,
+    taskName: Optional[str] = None,
+    pullEnabled: bool = False,
+):
     print(f"\n{color.RED}{color.BOLD}ERROR{color.END} {err.message}")
 
     if err.details:
@@ -130,6 +277,23 @@ def printSgflError(err: SGFLError):
         print("\nHow to fix:")
         for i, suggestion in enumerate(err.suggestions, start=1):
             print(f"  {i}. {suggestion}")
+
+    if includeEnvDiagnostics:
+        print("\nDetailed .env diagnostics:")
+        for line in _getEnvDiagnosticsLines(envDiagnosticKeys):
+            print(f"  {line}")
+
+    if includeDetailedDiagnostics:
+        print("\nDetailed runtime diagnostics:")
+        for line in _runtimeDiagnosticsLines(taskName, pullEnabled):
+            print(f"  {line}")
+
+        for section, lines in err.diagnostics.items():
+            if not lines:
+                continue
+            print(f"\n{section}:")
+            for line in lines:
+                print(f"  {line}")
 
 
 def getFileURI(name: str) -> str:
