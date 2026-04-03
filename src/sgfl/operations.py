@@ -225,7 +225,10 @@ def startPlace(pull: bool):
 
         deleteFile(PLACE_FILE_PATH)
         runCommand(
-            ["code", "."], step="Opening project in VS Code.", captureOutput=False
+            ["code", "."],
+            step="Opening project in VS Code.",
+            captureOutput=False,
+            shell=True,
         )
         announceStep("Starting Rojo server.")
         runCommand(
