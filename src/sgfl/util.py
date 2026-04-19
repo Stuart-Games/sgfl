@@ -86,7 +86,7 @@ def _runtimeDiagnosticsLines(taskName: Optional[str], pullEnabled: bool) -> list
         f"platform: {sys.platform}",
         f"python: {sys.version.split()[0]} ({sys.executable})",
         f"assets.json present: {'yes' if os.path.exists(ASSET_CONFIG_FILE_PATH) else 'no'}",
-        f"Place.rbxlx present: {'yes' if os.path.exists(PLACE_FILE_PATH) else 'no'}",
+        f"Place.rbxl present: {'yes' if os.path.exists(PLACE_FILE_PATH) else 'no'}",
     ]
 
     lines.extend(_toolDiagnosticsForTask(taskName, pullEnabled))
@@ -353,5 +353,5 @@ def deleteFile(path: str):
         os.remove(path)
 
 
-PLACE_FILE_PATH = getFileURI("Place.rbxlx")
+PLACE_FILE_PATH = getFileURI("Place.rbxl")
 ASSET_CONFIG_FILE_PATH = getFileURI("assets.json")

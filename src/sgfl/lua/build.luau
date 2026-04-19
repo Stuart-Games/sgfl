@@ -33,10 +33,10 @@ for fileName, data in shared.getAssetTreeJson() do
 	local serviceName = splitPath[1]
 
 	--somethign like workspace where its thought of as a singular object
-	local rbxmxFile = shared.getRbxmxString(data.folder, fileName)
+	local rbxmFile = shared.getRbxmString(data.folder, fileName)
 
 	if directService then
-		local service = readAsset(rbxmxFile)
+		local service = readAsset(rbxmFile)
 		serviceInstances[serviceName] = service
 	else --subfolders of services
 		local service = serviceInstances[serviceName]
@@ -48,7 +48,7 @@ for fileName, data in shared.getAssetTreeJson() do
 		local folder = Instance.new("Folder")
 		folder.Name = splitPath[2]
 		folder.Parent = service
-		readFileToParent(rbxmxFile, folder)
+		readFileToParent(rbxmFile, folder)
 	end
 end
 
@@ -62,4 +62,4 @@ end
 local gameData = roblox.serializeModel(instanceTable)
 local game = roblox.deserializePlace(gameData)
 local file = roblox.serializePlace(game)
-fs.writeFile("./Place.rbxlx", file)
+fs.writeFile("./Place.rbxl", file)

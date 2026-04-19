@@ -1,3 +1,4 @@
+import glob
 import requests
 from urllib.parse import urlparse
 from typing import Optional
@@ -120,12 +121,34 @@ def _withAuthorizationWarning(
     return [*baseSuggestions, warning]
 
 
+def _checkForOutdatedAssets():
+    configPath = (
+        ASSET_CONFIG_FILE_PATH
+        if os.path.exists(ASSET_CONFIG_FILE_PATH)
+        else getAbsoluteFileURI("json/default.assets.json")
+    )
+    assetTable = getTableFromJsonFile(configPath)
+    folders = {data["folder"] for data in assetTable.values()}
+    outdated = any(
+        glob.glob(f"{folder}/*.rbxmx")
+        for folder in folders
+        if os.path.isdir(folder)
+    )
+    if outdated:
+        raise SGFLError(
+            "Project assets are in the outdated XML format (.rbxmx).",
+            suggestions=["Run sgfl save to migrate assets to the binary format (.rbxm)."],
+        )
+
+
 def startPlace(pull: bool):
     announceStep("Checking environment configuration for publish flow.")
     placeId = getEnvSafe("PLACE_ID")
     universeId = getEnvSafe("UNIVERSE_ID")
     publishKey = getEnvSafe("PUBLISH_KEY")
     userId = getEnvSafe("USER_ID")
+
+    _checkForOutdatedAssets()
 
     # pull and build
     if pull:
@@ -143,7 +166,7 @@ def startPlace(pull: bool):
 
     # make correct publish req to roblox
     url = f"https://apis.roblox.com/universes/v1/{universeId}/places/{placeId}/versions?versionType=Published"
-    headers = {"x-api-key": publishKey, "Content-Type": "application/xml"}
+    headers = {"x-api-key": publishKey, "Content-Type": "application/octet-stream"}
 
     announceStep("Uploading built place file to Roblox.")
     try:
@@ -151,11 +174,11 @@ def startPlace(pull: bool):
             placeBinary = f.read()
     except OSError as exc:
         raise SGFLError(
-            "Failed to read generated Place.rbxlx file.",
+            "Failed to read generated Place.rbxl file.",
             details=str(exc),
             suggestions=[
                 "Check that lua/build.luau completed successfully.",
-                "Verify that Place.rbxlx can be created in the project root.",
+                "Verify that Place.rbxl can be created in the project root.",
             ],
         )
 
@@ -388,7 +411,7 @@ def savePlace():
             f.write(placeData)
     except OSError as exc:
         raise SGFLError(
-            "Failed to write Place.rbxlx to disk.",
+            "Failed to write Place.rbxl to disk.",
             details=str(exc),
             suggestions=[
                 "Check filesystem permissions in the project directory.",

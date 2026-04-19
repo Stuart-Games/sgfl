@@ -11,8 +11,8 @@ export type TableType = {
 	},
 }
 
-function shared.getRbxmxString(folder: string, fileName: string): string
-	return `{folder}/{fileName}.rbxmx`
+function shared.getRbxmString(folder: string, fileName: string): string
+	return `{folder}/{fileName}.rbxm`
 end
 
 function shared.getSgflFile(relativePath: string): string

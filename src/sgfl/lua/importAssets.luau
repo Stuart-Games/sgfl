@@ -2,7 +2,7 @@ local roblox = require("@lune/roblox")
 local fs = require("@lune/fs")
 local shared = require("./shared")
 
-local content = fs.readFile("Place.rbxlx")
+local content = fs.readFile("Place.rbxl")
 local game = roblox.deserializePlace(content)
 
 --Destroy camera to avoid merge conflict as it is regenerated anyway
@@ -18,7 +18,7 @@ for fileName, data in shared.getAssetTreeJson() do
 
 	local splitPath = data.robloxPath:split(".")
 	local modelPath = if #splitPath == 1 then game[splitPath[1]] else game[splitPath[1]][splitPath[2]]
-	local model = roblox.serializeModel({ modelPath }, true)
+	local model = roblox.serializeModel({ modelPath })
 
-	fs.writeFile(`{data.folder}/{fileName}.rbxmx`, model)
+	fs.writeFile(`{data.folder}/{fileName}.rbxm`, model)
 end
