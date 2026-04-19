@@ -8,8 +8,9 @@ sgfl = "sgfl.cli:app"
 [project]
 dependencies = ["typer", "requests", "python-dotenv"]
 name = "sgfl"
-version = "1.4.0"
+version = "1.4.1"
 authors = [{ name = "devvf" }]
+maintainers = [{ name = "stuart-2202" }]
 description = "A package for managing the Stuart Games Roblox workflow."
 readme = "README.md"
 requires-python = ">=3.9"

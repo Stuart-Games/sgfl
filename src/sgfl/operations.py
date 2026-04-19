@@ -121,14 +121,17 @@ def _withAuthorizationWarning(
     return [*baseSuggestions, warning]
 
 
-def _checkForOutdatedAssets():
+def _getAssetFolders() -> set[str]:
     configPath = (
         ASSET_CONFIG_FILE_PATH
         if os.path.exists(ASSET_CONFIG_FILE_PATH)
         else getAbsoluteFileURI("json/default.assets.json")
     )
-    assetTable = getTableFromJsonFile(configPath)
-    folders = {data["folder"] for data in assetTable.values()}
+    return {data["folder"] for data in getTableFromJsonFile(configPath).values()}
+
+
+def _checkForOutdatedAssets():
+    folders = _getAssetFolders()
     outdated = any(
         glob.glob(f"{folder}/*.rbxmx")
         for folder in folders
@@ -139,6 +142,13 @@ def _checkForOutdatedAssets():
             "Project assets are in the outdated XML format (.rbxmx).",
             suggestions=["Run sgfl save to migrate assets to the binary format (.rbxm)."],
         )
+
+
+def _deleteOutdatedAssets():
+    folders = _getAssetFolders()
+    for folder in folders:
+        for path in glob.glob(f"{folder}/*.rbxmx"):
+            os.remove(path)
 
 
 def startPlace(pull: bool):
@@ -420,6 +430,7 @@ def savePlace():
         )
 
     runLuauFile("lua/importAssets.luau")
+    _deleteOutdatedAssets()
 
     deleteFile(PLACE_FILE_PATH)
     print(
