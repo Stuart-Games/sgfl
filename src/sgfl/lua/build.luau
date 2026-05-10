@@ -4,7 +4,7 @@ local shared = require("./shared")
 
 local Instance = roblox.Instance
 
-function readAsset(filePath: string)
+local function readAsset(filePath: string)
 	if fs.isFile(filePath) then
 		local modelFile = fs.readFile(filePath)
 		local asset = roblox.deserializeModel(modelFile)[1]
@@ -14,52 +14,73 @@ function readAsset(filePath: string)
 	return nil
 end
 
-function readFileToParent(filePath: string, parent: Instance)
-	local masterModel = readAsset(filePath)
-
-	if masterModel then
-		for i, child in masterModel:GetChildren() do
-			child.Parent = parent
-		end
+local function clearChildren(target: Instance)
+	for _, child in target:GetChildren() do
+		child:Destroy()
 	end
 end
 
-local serviceInstances = {}
+local function moveChildrenInto(source: Instance, target: Instance)
+	for _, child in source:GetChildren() do
+		child.Parent = target
+	end
+end
 
---parses services and folders within those services
+--Place.rbxl is produced by `rojo build` before this script runs, so the
+--DataModel already contains every script tree declared in default.project.json.
+--We layer the binary rbxm assets on top of that, replacing only the services
+--and folders explicitly listed in assets.json.
+local placeBytes = fs.readFile("Place.rbxl")
+local game = roblox.deserializePlace(placeBytes)
+
 for fileName, data in shared.getAssetTreeJson() do
+	local rbxmFile = shared.getRbxmString(data.folder, fileName)
+	local rbxmRoot = readAsset(rbxmFile)
+
+	if not rbxmRoot then
+		continue
+	end
+
 	local splitPath = data.robloxPath:split(".")
-	local directService = #splitPath == 1
 	local serviceName = splitPath[1]
 
-	--somethign like workspace where its thought of as a singular object
-	local rbxmFile = shared.getRbxmString(data.folder, fileName)
+	local service = game:FindFirstChild(serviceName)
+	if not service then
+		service = Instance.new(serviceName)
+		service.Parent = game
+	end
 
-	if directService then
-		local service = readAsset(rbxmFile)
-		serviceInstances[serviceName] = service
-	else --subfolders of services
-		local service = serviceInstances[serviceName]
-		if not service then
-			serviceInstances[serviceName] = Instance.new(serviceName)
-			service = serviceInstances[serviceName]
+	if #splitPath == 1 then
+		clearChildren(service)
+		moveChildrenInto(rbxmRoot, service)
+	else
+		local folderName = splitPath[2]
+		local folder = service:FindFirstChild(folderName)
+		if folder then
+			clearChildren(folder)
+		else
+			folder = Instance.new("Folder")
+			folder.Name = folderName
+			folder.Parent = service
 		end
-
-		local folder = Instance.new("Folder")
-		folder.Name = splitPath[2]
-		folder.Parent = service
-		readFileToParent(rbxmFile, folder)
+		moveChildrenInto(rbxmRoot, folder)
 	end
 end
 
-local instanceTable = {}
-
-for _, instance in serviceInstances do
-	table.insert(instanceTable, instance)
+--Optional user hook: postbuild.luau in the project root may `return` a
+--`function(game)` that mutates the in-memory DataModel before serialization.
+if fs.isFile("postbuild.luau") then
+	local loaded, syntaxErr = loadstring(fs.readFile("postbuild.luau"), "postbuild.luau")
+	if not loaded then
+		error("postbuild.luau failed to parse: " .. tostring(syntaxErr))
+	end
+	local hook = loaded()
+	if type(hook) == "function" then
+		hook(game)
+	else
+		error("postbuild.luau must `return function(game) ... end` (got " .. type(hook) .. ")")
+	end
 end
 
---Serialise services into a game, deserialise that into a place, and then serialise that to a file.
-local gameData = roblox.serializeModel(instanceTable)
-local game = roblox.deserializePlace(gameData)
 local file = roblox.serializePlace(game)
 fs.writeFile("./Place.rbxl", file)

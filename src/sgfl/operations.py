@@ -155,6 +155,18 @@ def _deleteOutdatedAssets():
             os.remove(path)
 
 
+def _runRojoBuild():
+    runCommand(
+        ["rojo", "build", "default.project.json", "-o", "Place.rbxl"],
+        step="Compiling scripts via Rojo into Place.rbxl.",
+        suggestions=[
+            "Install Rojo or ensure it is available on PATH (rokit add rojo).",
+            "Verify default.project.json exists and is valid.",
+            "Run 'rojo build default.project.json -o Place.rbxl' manually to see detailed errors.",
+        ],
+    )
+
+
 def startPlace(pull: bool):
     announceStep("Checking environment configuration for publish flow.")
     placeId = getEnvSafe("PLACE_ID")
@@ -176,6 +188,7 @@ def startPlace(pull: bool):
             captureOutput=False,
         )
 
+    _runRojoBuild()
     runLuauFile("lua/build.luau")
 
     # make correct publish req to roblox
@@ -191,7 +204,7 @@ def startPlace(pull: bool):
             "Failed to read generated Place.rbxl file.",
             details=str(exc),
             suggestions=[
-                "Check that lua/build.luau completed successfully.",
+                "Check that rojo build and lua/build.luau completed successfully.",
                 "Verify that Place.rbxl can be created in the project root.",
             ],
         )
@@ -749,7 +762,7 @@ def publishPlaces(
         )
     else:
         summaryLines.append(
-            f"{color.CYAN}{color.BOLD}INFO{color.END} Place.rbxl will be built fresh from lua/build.luau."
+            f"{color.CYAN}{color.BOLD}INFO{color.END} Place.rbxl will be built fresh via rojo + lua/build.luau."
         )
     if dryRun:
         summaryLines.append(f"{color.YELLOW}{color.BOLD}DRY-RUN{color.END} no upload will be performed.")
@@ -774,6 +787,7 @@ def publishPlaces(
         raise typer.Exit(code=0)
 
     if not noBuild:
+        _runRojoBuild()
         runLuauFile("lua/build.luau")
 
     try:
@@ -784,7 +798,7 @@ def publishPlaces(
             "Failed to read generated Place.rbxl file.",
             details=str(exc),
             suggestions=[
-                "Check that lua/build.luau completed successfully.",
+                "Check that rojo build and lua/build.luau completed successfully.",
                 "Re-run without --no-build to regenerate Place.rbxl.",
             ],
         )

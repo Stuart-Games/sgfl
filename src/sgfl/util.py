@@ -79,6 +79,8 @@ def _toolDiagnosticsForTask(taskName: Optional[str], pullEnabled: bool) -> list[
             requiredTools.append("git")
     elif taskName == "save":
         requiredTools.append("lune")
+    elif taskName == "publish":
+        requiredTools.extend(["lune", "rojo"])
     elif taskName == "init":
         requiredTools.extend(["rokit"])
     elif taskName == "update":

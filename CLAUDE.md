@@ -24,6 +24,8 @@ There are four top-level subcommands — `start`, `save`, `init`, `publish` — 
 
 `Place.rbxl` is treated as an **ephemeral build artifact** — it is created, used, then deleted on every `start`/`save`/`publish`. It must NOT be committed (the generated `.gitignore` excludes it).
 
+**Post-build hook**: if a file named `postbuild.luau` exists in the project root, `start` and `publish` run it via `lune run postbuild.luau` after `lua/build.luau` finishes and before the upload (`save` doesn't run it — it's a build-time hook, not a download-time one). The hook can read/modify/rewrite `Place.rbxl` to patch around tooling bugs (e.g. Lune Roblox-instance quirks). The file is optional — if absent, the step is silently skipped. Implementation: `_runPostBuildHook` in [operations.py](src/sgfl/operations.py); path constant `POST_BUILD_HOOK_PATH` in [util.py](src/sgfl/util.py).
+
 ## Auth & Env Layering
 
 Identity (per-developer secrets) is separate from project config. Three sources, layered with later wins on conflict:
