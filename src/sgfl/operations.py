@@ -1,5 +1,9 @@
 import glob
+import getpass
+import sys
 import requests
+import typer
+from datetime import datetime
 from urllib.parse import urlparse
 from typing import Optional
 from sys import platform
@@ -484,4 +488,361 @@ def initPlace():
 
     print(
         f"{color.GREEN}{color.BOLD}SUCCESS{color.END} Created new sgfl instance. To get started run {color.BOLD}sgfl start{color.END}."
+    )
+
+
+def _promptCredential(label: str, currentValue: Optional[str], hideInput: bool) -> Optional[str]:
+    if currentValue:
+        suffix = f" [{maskSecret(currentValue) if hideInput else currentValue}]"
+        hint = " (press Enter to keep current value)"
+    else:
+        suffix = ""
+        hint = ""
+    prompt = f"{label}{suffix}{hint}: "
+    if hideInput:
+        entered = getpass.getpass(prompt)
+    else:
+        entered = input(prompt)
+    entered = entered.strip()
+    if entered == "":
+        return None
+    return entered
+
+
+def authLogin(
+    publishKey: Optional[str] = None,
+    downloadKey: Optional[str] = None,
+    userId: Optional[str] = None,
+):
+    interactive = (
+        publishKey is None and downloadKey is None and userId is None
+    )
+
+    if interactive:
+        if not sys.stdin.isatty():
+            raise SGFLError(
+                "Refusing to prompt for credentials in a non-interactive session.",
+                details="sgfl auth login requires a TTY when called without flags.",
+                suggestions=[
+                    "Run sgfl auth login from an interactive terminal.",
+                    "For scripts, pass --publish-key / --download-key / --user-id directly.",
+                ],
+            )
+
+        loadCredentials()
+        current = {key: os.environ.get(key) for key in CREDENTIAL_KEYS}
+
+        announceStep(f"Updating credentials at {CREDENTIALS_PATH}.")
+        print("Press Enter to keep an existing value; type a new value to replace it.\n")
+
+        publishKey = _promptCredential("PUBLISH_KEY", current["PUBLISH_KEY"], hideInput=True)
+        downloadKey = _promptCredential("DOWNLOAD_KEY", current["DOWNLOAD_KEY"], hideInput=True)
+        userId = _promptCredential("USER_ID", current["USER_ID"], hideInput=False)
+
+        if publishKey is None and downloadKey is None and userId is None:
+            print(f"\n{color.YELLOW}{color.BOLD}NOOP{color.END} No credentials changed.")
+            return
+
+    values = {
+        "PUBLISH_KEY": publishKey,
+        "DOWNLOAD_KEY": downloadKey,
+        "USER_ID": userId,
+    }
+
+    if userId is not None and not userId.isdigit():
+        raise SGFLError(
+            "USER_ID must be numeric.",
+            details=f"Got: {userId}",
+            suggestions=[
+                "USER_ID is your numeric Roblox user ID (no username, no hyphens).",
+            ],
+        )
+
+    path = saveCredentials(values)
+    updated = [key for key, val in values.items() if val is not None]
+    print(
+        f"\n{color.GREEN}{color.BOLD}SUCCESS{color.END} "
+        f"Wrote credentials to {path} (updated: {', '.join(updated)})."
+    )
+
+
+def runUpdate():
+    announceStep("Upgrading sgfl via pipx.")
+
+    runCommand(
+        ["pipx", "upgrade", "sgfl"],
+        suggestions=[
+            "Ensure pipx is installed and on PATH (see https://pipx.pypa.io/).",
+            "If sgfl was not installed via pipx, reinstall with: pipx install --force git+https://github.com/devvf/sgfl.git",
+        ],
+        captureOutput=False,
+    )
+
+    invalidateUpdateCache()
+
+    print(
+        f"\n{color.GREEN}{color.BOLD}SUCCESS{color.END} "
+        f"sgfl upgraded. Re-run your previous command to use the new version."
+    )
+
+
+def authStatus():
+    announceStep(f"Inspecting credentials at {CREDENTIALS_PATH}.")
+    if not os.path.exists(CREDENTIALS_PATH):
+        print(
+            f"{color.YELLOW}{color.BOLD}MISSING{color.END} "
+            f"No credentials file at {CREDENTIALS_PATH}.\n"
+            f"Run {color.BOLD}sgfl auth login{color.END} to create one."
+        )
+        return
+
+    loadCredentials()
+
+    print(f"File: {CREDENTIALS_PATH}")
+    try:
+        mode = oct(os.stat(CREDENTIALS_PATH).st_mode & 0o777)
+        print(f"Mode: {mode}")
+    except OSError:
+        pass
+
+    for key in CREDENTIAL_KEYS:
+        value = os.environ.get(key)
+        if value is None or value.strip() == "":
+            print(f"  - {key}: {color.RED}MISSING{color.END}")
+            continue
+
+        trimmed = value.strip()
+        notes: list[str] = []
+        if value != trimmed:
+            notes.append("contains leading/trailing whitespace")
+        if key == "USER_ID" and not trimmed.isdigit():
+            notes.append("should be numeric")
+        if key in ("PUBLISH_KEY", "DOWNLOAD_KEY") and len(trimmed) < 16:
+            notes.append("looks unusually short for an API key")
+
+        display = (
+            maskSecret(trimmed)
+            if key in ("PUBLISH_KEY", "DOWNLOAD_KEY")
+            else trimmed
+        )
+        line = f"  - {key}: {color.GREEN}SET{color.END} value={display} (len={len(trimmed)})"
+        if notes:
+            line += "; notes: " + "; ".join(notes)
+        print(line)
+
+
+def _formatPlaceFileSummary(path: str) -> str:
+    sizeBytes = os.path.getsize(path)
+    sizeMb = sizeBytes / (1024 * 1024)
+    mtime = datetime.fromtimestamp(os.path.getmtime(path)).strftime("%Y-%m-%d %H:%M:%S")
+    return f"Place.rbxl: {sizeMb:.2f} MB, modified {mtime}"
+
+
+def _publishPlaceFile(
+    *,
+    name: str,
+    placeId: str,
+    universeId: str,
+    publishKey: str,
+    placeBinary: bytes,
+    versionType: str,
+) -> Optional[dict]:
+    url = (
+        f"https://apis.roblox.com/universes/v1/{universeId}"
+        f"/places/{placeId}/versions?versionType={versionType}"
+    )
+    headers = {"x-api-key": publishKey, "Content-Type": "application/octet-stream"}
+
+    announceStep(f"Uploading to {name} ({placeId})...")
+    try:
+        res = requests.post(
+            url, headers=headers, data=placeBinary, timeout=REQUEST_TIMEOUT_SECONDS
+        )
+    except requests.RequestException as exc:
+        return {
+            "name": name,
+            "placeId": placeId,
+            "reason": f"network error: {exc}",
+            "diagnostics": _httpDiagnostics(
+                method="POST",
+                url=url,
+                apiKeyName="PUBLISH_KEY",
+                apiKey=publishKey,
+                error=exc,
+            ),
+        }
+
+    if res.status_code != 200:
+        return {
+            "name": name,
+            "placeId": placeId,
+            "reason": f"HTTP {res.status_code}: {_responseReason(res)}",
+            "statusCode": res.status_code,
+            "diagnostics": _httpDiagnostics(
+                method="POST",
+                url=url,
+                apiKeyName="PUBLISH_KEY",
+                apiKey=publishKey,
+                response=res,
+            ),
+        }
+
+    print(f"{color.GREEN}{color.BOLD}OK{color.END}   {name} published successfully.")
+    return None
+
+
+def publishPlaces(
+    env: str,
+    *,
+    dryRun: bool = False,
+    noBuild: bool = False,
+    placesFilter: Optional[list[str]] = None,
+    versionType: str = "Published",
+):
+    announceStep(f"Loading environment file .env.{env}.")
+    loadEnvFile(env)
+
+    announceStep("Reading universe configuration.")
+    universeId = getEnvSafe("UNIVERSE_ID")
+    publishKey = getEnvSafe("PUBLISH_KEY")
+    places = discoverPlaceIds()
+
+    if placesFilter:
+        normalized = [p.strip().lower() for p in placesFilter if p.strip()]
+        unknown = [p for p in normalized if p not in places]
+        if unknown:
+            raise SGFLError(
+                "Unknown place name in --places filter.",
+                details=(
+                    f"Filter referenced: {', '.join(unknown)}. "
+                    f"Available: {', '.join(sorted(places.keys()))}."
+                ),
+                suggestions=[
+                    "Use names defined as PLACE_ID_<NAME> in your env file (case-insensitive).",
+                    "Drop --places to publish to every declared place.",
+                ],
+            )
+        places = {name: places[name] for name in normalized}
+
+    _checkForOutdatedAssets()
+
+    if noBuild and not os.path.exists(PLACE_FILE_PATH):
+        raise SGFLError(
+            "--no-build was passed but Place.rbxl does not exist.",
+            details=f"Expected file at: {PLACE_FILE_PATH}.",
+            suggestions=[
+                "Run sgfl publish without --no-build to build first.",
+                "Run lua/build.luau manually if you have a custom build pipeline.",
+            ],
+        )
+
+    summaryLines = [
+        f"{color.CYAN}{color.BOLD}INFO{color.END} About to publish to universe {universeId} (env={env}):"
+    ]
+    nameWidth = max(len(name) for name in places.keys())
+    for name in sorted(places.keys()):
+        summaryLines.append(f"        - {name.ljust(nameWidth)}  ->  {places[name]}")
+    summaryLines.append(f"{color.CYAN}{color.BOLD}INFO{color.END} versionType: {versionType}")
+    if noBuild:
+        summaryLines.append(
+            f"{color.CYAN}{color.BOLD}INFO{color.END} {_formatPlaceFileSummary(PLACE_FILE_PATH)} (existing — --no-build)"
+        )
+    else:
+        summaryLines.append(
+            f"{color.CYAN}{color.BOLD}INFO{color.END} Place.rbxl will be built fresh from lua/build.luau."
+        )
+    if dryRun:
+        summaryLines.append(f"{color.YELLOW}{color.BOLD}DRY-RUN{color.END} no upload will be performed.")
+
+    if dryRun:
+        print()
+        for line in summaryLines:
+            print(line)
+        print(
+            f"\n{color.YELLOW}{color.BOLD}DRY-RUN{color.END} would publish to {len(places)} place(s); skipping confirmation, build, and upload."
+        )
+        return
+
+    confirmPublish(env, summaryLines)
+
+    toggleMessage = (
+        f"{color.RED}{color.BOLD}PLEASE MOVE TO YES TO CONFIRM{color.END}"
+        f"  (←/→ to choose, Enter to commit)"
+    )
+    if not confirmToggle(toggleMessage, defaultYes=False):
+        announceStep("Aborted by user.")
+        raise typer.Exit(code=0)
+
+    if not noBuild:
+        runLuauFile("lua/build.luau")
+
+    try:
+        with open(PLACE_FILE_PATH, "rb") as f:
+            placeBinary = f.read()
+    except OSError as exc:
+        raise SGFLError(
+            "Failed to read generated Place.rbxl file.",
+            details=str(exc),
+            suggestions=[
+                "Check that lua/build.luau completed successfully.",
+                "Re-run without --no-build to regenerate Place.rbxl.",
+            ],
+        )
+
+    failures: list[dict] = []
+    for name in sorted(places.keys()):
+        failure = _publishPlaceFile(
+            name=name,
+            placeId=places[name],
+            universeId=universeId,
+            publishKey=publishKey,
+            placeBinary=placeBinary,
+            versionType=versionType,
+        )
+        if failure is not None:
+            failures.append(failure)
+
+    print(f"\n{color.BOLD}Publish summary{color.END} (env={env}, universe={universeId}):")
+    nameWidth = max(len(name) for name in places.keys())
+    failedNames = {f["name"] for f in failures}
+    for name in sorted(places.keys()):
+        marker = (
+            f"{color.RED}{color.BOLD}FAIL{color.END}"
+            if name in failedNames
+            else f"{color.GREEN}{color.BOLD} OK {color.END}"
+        )
+        line = f"  {marker}  {name.ljust(nameWidth)}  ->  {places[name]}"
+        if name in failedNames:
+            reason = next(f["reason"] for f in failures if f["name"] == name)
+            line += f"   {reason}"
+        print(line)
+
+    deleteFile(PLACE_FILE_PATH)
+
+    if failures:
+        anyAuthError = any(
+            f.get("statusCode") in (401, 403) for f in failures
+        )
+        suggestions = [
+            "Inspect each failed place's HTTP diagnostics with --detailed.",
+            "Confirm UNIVERSE_ID and every PLACE_ID_<NAME> point to the right place.",
+        ]
+        if anyAuthError:
+            suggestions.append(
+                "PUBLISH_KEY may lack permissions on one or more places — check scopes and allowed-IP settings in the Creator Dashboard."
+            )
+
+        diagnostics: dict[str, list[str]] = {}
+        for f in failures:
+            diagnostics[f"HTTP diagnostics ({f['name']})"] = f["diagnostics"]
+
+        raise SGFLError(
+            f"{len(failures)} of {len(places)} place(s) failed to publish.",
+            details="; ".join(f"{f['name']}: {f['reason']}" for f in failures),
+            suggestions=suggestions,
+            diagnostics=diagnostics,
+        )
+
+    print(
+        f"\n{color.GREEN}{color.BOLD}SUCCESS{color.END} Published to {len(places)} place(s) in universe {universeId}."
     )
