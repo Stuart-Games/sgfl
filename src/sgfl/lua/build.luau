@@ -1,17 +1,33 @@
 local roblox = require("@lune/roblox")
 local fs = require("@lune/fs")
+local process = require("@lune/process")
 local shared = require("./shared")
 
 local Instance = roblox.Instance
+local debug = process.env.SGFL_DEBUG == "1"
 
 local function readAsset(filePath: string)
-	if fs.isFile(filePath) then
-		local modelFile = fs.readFile(filePath)
-		local asset = roblox.deserializeModel(modelFile)[1]
-		return asset
+	if not fs.isFile(filePath) then
+		if debug then
+			print(`[sgfl build] SKIP {filePath} (file not found)`)
+		end
+		return nil
 	end
 
-	return nil
+	local modelFile = fs.readFile(filePath)
+	local ok, result = pcall(function()
+		return roblox.deserializeModel(modelFile)[1]
+	end)
+
+	if not ok then
+		error(`[sgfl build] Failed to deserialize {filePath}: {result}`)
+	end
+
+	if debug then
+		print(`[sgfl build] READ {filePath} ({#modelFile} bytes) -> {result.ClassName}`)
+	end
+
+	return result
 end
 
 local function clearChildren(target: Instance)
@@ -25,6 +41,7 @@ local function moveChildrenInto(source: Instance, target: Instance)
 		child.Parent = target
 	end
 end
+
 
 --Place.rbxl is produced by `rojo build` before this script runs, so the
 --DataModel already contains every script tree declared in default.project.json.
@@ -51,8 +68,16 @@ for fileName, data in shared.getAssetTreeJson() do
 	end
 
 	if #splitPath == 1 then
-		clearChildren(service)
-		moveChildrenInto(rbxmRoot, service)
+		-- Replace the entire service with the saved instance so that non-scriptable
+		-- service properties (e.g. PhysicsService.CollisionGroupData) are preserved
+		-- in the binary representation without needing to enumerate or copy them.
+		service:Destroy()
+		rbxmRoot.Name = serviceName
+		rbxmRoot.Parent = game
+
+		if debug then
+			print(`[sgfl build] {serviceName}: replaced service from rbxm`)
+		end
 	else
 		local folderName = splitPath[2]
 		local folder = service:FindFirstChild(folderName)

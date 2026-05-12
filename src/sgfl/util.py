@@ -750,14 +750,45 @@ def confirmToggle(message: str, *, defaultYes: bool = False) -> bool:
         sys.stdout.write(f"\r\x1b[2K{message}  {noPart}   {yesPart}")
         sys.stdout.flush()
 
-    print()
-    render()
+    sys.stdout.write("\x1b[?25l")
+    sys.stdout.flush()
+    try:
+        print()
+        render()
 
-    if sys.platform == "win32":
-        readKey = lambda: _readKeyFromFd(sys.stdin.fileno())
+        if sys.platform == "win32":
+            readKey = lambda: _readKeyFromFd(sys.stdin.fileno())
+            try:
+                while True:
+                    key = readKey()
+                    if key == "left":
+                        state["selected"] = "no"
+                        render()
+                    elif key == "right":
+                        state["selected"] = "yes"
+                        render()
+                    elif key == "enter":
+                        sys.stdout.write("\n")
+                        sys.stdout.flush()
+                        return state["selected"] == "yes"
+                    elif key == "esc":
+                        sys.stdout.write("\n")
+                        sys.stdout.flush()
+                        return False
+            except KeyboardInterrupt:
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+                raise
+
+        import termios
+        import tty
+
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
         try:
+            tty.setraw(fd)
             while True:
-                key = readKey()
+                key = _readKeyFromFd(fd)
                 if key == "left":
                     state["selected"] = "no"
                     render()
@@ -765,44 +796,19 @@ def confirmToggle(message: str, *, defaultYes: bool = False) -> bool:
                     state["selected"] = "yes"
                     render()
                 elif key == "enter":
-                    sys.stdout.write("\n")
+                    sys.stdout.write("\r\n")
                     sys.stdout.flush()
                     return state["selected"] == "yes"
                 elif key == "esc":
-                    sys.stdout.write("\n")
+                    sys.stdout.write("\r\n")
                     sys.stdout.flush()
                     return False
         except KeyboardInterrupt:
-            sys.stdout.write("\n")
+            sys.stdout.write("\r\n")
             sys.stdout.flush()
             raise
-
-    import termios
-    import tty
-
-    fd = sys.stdin.fileno()
-    old = termios.tcgetattr(fd)
-    try:
-        tty.setraw(fd)
-        while True:
-            key = _readKeyFromFd(fd)
-            if key == "left":
-                state["selected"] = "no"
-                render()
-            elif key == "right":
-                state["selected"] = "yes"
-                render()
-            elif key == "enter":
-                sys.stdout.write("\r\n")
-                sys.stdout.flush()
-                return state["selected"] == "yes"
-            elif key == "esc":
-                sys.stdout.write("\r\n")
-                sys.stdout.flush()
-                return False
-    except KeyboardInterrupt:
-        sys.stdout.write("\r\n")
-        sys.stdout.flush()
-        raise
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
     finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        sys.stdout.write("\x1b[?25h")
+        sys.stdout.flush()
