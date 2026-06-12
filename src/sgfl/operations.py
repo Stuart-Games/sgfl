@@ -1,5 +1,6 @@
 import glob
 import getpass
+import shutil
 import sys
 import requests
 import typer
@@ -461,14 +462,14 @@ def initPlace():
     createDirIfNotExist("src/ReplicatedStorage")
     createDirIfNotExist("src/ReplicatedStorage/Util")
     createDirIfNotExist("src/ServerScriptService")
-    createDirIfNotExist("src/StarterPlayerScripts")
-    createDirIfNotExist("src/StarterCharacterScripts")
-    createDirIfNotExist("src/ReplicatedFirst")
 
     assetTable = getTableFromJsonFile("json/default.assets.json")
 
-    for _, data in assetTable.items():
+    for name, data in assetTable.items():
         createDirIfNotExist(data["folder"])
+        defaultSrc = getAbsoluteFileURI(f"defaults/{name}.rbxm")
+        if os.path.isfile(defaultSrc):
+            shutil.copy2(defaultSrc, f"{data['folder']}/{name}.rbxm")
 
     # https://stackoverflow.com/a/12309296
     with open("assets.json", "w", encoding="utf-8") as f:

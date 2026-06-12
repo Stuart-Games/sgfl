@@ -19,9 +19,9 @@
         "folder":"assets",
         "robloxPath":"ReplicatedStorage.RemoteSignals"
     },
-    "ReplicatedSignals": {
+    "Input": {
         "folder":"assets",
-        "robloxPath":"ReplicatedStorage.Signals"
+        "robloxPath":"ReplicatedStorage.Input"
     },
     "ReplicatedAssets": {
         "folder":"assets",
@@ -38,5 +38,29 @@
     "StyleSheets": {
         "folder":"assets",
         "robloxPath":"ReplicatedStorage.StyleSheets"
+    },
+    "ReplicatedSignals": {
+        "folder":"assets",
+        "robloxPath":"ReplicatedStorage.Signals"
+    },
+    "TextChatService": {
+        "folder":"assets",
+        "robloxPath":"TextChatService"
+    },
+    "PhysicsService": {
+        "folder":"assets",
+        "robloxPath":"PhysicsService"
+    },
+    "ReplicatedFirst": {
+        "folder":"assets",
+        "robloxPath":"ReplicatedFirst"
+    },
+    "StarterPlayer": {
+        "folder":"assets",
+        "robloxPath":"StarterPlayer"
+    },
+    "TestService": {
+        "folder":"assets",
+        "robloxPath":"TestService"
     }
 }
