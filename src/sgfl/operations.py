@@ -458,13 +458,12 @@ def savePlace():
 def initPlace():
     announceStep("Creating SGFL project folder structure.")
     createDirIfNotExist("src")
-    createDirIfNotExist("src/client")
-    createDirIfNotExist("src/server")
     createDirIfNotExist("src/shared")
     createDirIfNotExist("src/shared/Util")
-
-    open("src/client/init.client.luau", "w")
-    open("src/server/init.server.luau", "w")
+    createDirIfNotExist("src/ServerScriptService")
+    createDirIfNotExist("src/StarterPlayerScripts")
+    createDirIfNotExist("src/StarterCharacterScripts")
+    createDirIfNotExist("src/ReplicatedFirst")
 
     assetTable = getTableFromJsonFile("json/default.assets.json")
 
