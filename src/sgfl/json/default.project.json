@@ -6,9 +6,7 @@
             "$path": "src/ReplicatedFirst"
         },
         "ReplicatedStorage": {
-            "Shared": {
-                "$path": "src/shared"
-            }
+            "$path": "src/ReplicatedStorage"
         },
         "ServerScriptService": {
             "$path": "src/ServerScriptService"

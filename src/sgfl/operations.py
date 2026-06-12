@@ -458,8 +458,8 @@ def savePlace():
 def initPlace():
     announceStep("Creating SGFL project folder structure.")
     createDirIfNotExist("src")
-    createDirIfNotExist("src/shared")
-    createDirIfNotExist("src/shared/Util")
+    createDirIfNotExist("src/ReplicatedStorage")
+    createDirIfNotExist("src/ReplicatedStorage/Util")
     createDirIfNotExist("src/ServerScriptService")
     createDirIfNotExist("src/StarterPlayerScripts")
     createDirIfNotExist("src/StarterCharacterScripts")
