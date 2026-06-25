@@ -495,8 +495,8 @@ def initPlace():
 
     announceStep("Creating SGFL project folder structure.")
     createDirIfNotExist("src")
-    createDirIfNotExist("src/ReplicatedStorage")
-    createDirIfNotExist("src/ReplicatedStorage/Util")
+    createDirIfNotExist("src/Shared")
+    createDirIfNotExist("src/Shared/Util")
     createDirIfNotExist("src/ServerScriptService")
 
     assetTable = getTableFromJsonFile("json/default.assets.json")
