@@ -498,6 +498,9 @@ def initPlace():
     createDirIfNotExist("src/Shared")
     createDirIfNotExist("src/Shared/Util")
     createDirIfNotExist("src/ServerScriptService")
+    createDirIfNotExist("src/ReplicatedFirst")
+    createDirIfNotExist("src/StarterPlayerScripts")
+    createDirIfNotExist("src/StarterCharacterScripts")
 
     assetTable = getTableFromJsonFile("json/default.assets.json")
 

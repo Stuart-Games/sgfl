@@ -7,8 +7,21 @@
                 "$path": "src/Shared"
             }
         },
+        "ReplicatedFirst": {
+            "Shared": {
+                "$path": "src/ReplicatedFirst"
+            }
+        },
         "ServerScriptService": {
             "$path": "src/ServerScriptService"
+        },
+        "StarterPlayer": {
+            "StarterPlayerScripts": {
+                "$path": "src/StarterPlayerScripts"
+            },
+            "StarterCharacterScripts": {
+                "$path": "src/StarterCharacterScripts"
+            }
         }
     }
 }
