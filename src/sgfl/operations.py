@@ -261,17 +261,27 @@ def startPlace(pull: bool):
         placeOpenString = f"roblox-studio:1+userId:{userId}+task:EditPlace+placeId:{placeId}+universeId:{universeId}"
 
         # open studio (generic window)
-        if platform == "win32":  # windows (any ver)
-            runCommand(
-                ["cmd", "/c", "start", "", placeOpenString],
-                step="Opening Roblox Studio for the published place.",
-                captureOutput=False,
-            )
-        elif platform == "darwin":  # macos
-            runCommand(
-                ["open", placeOpenString],
-                step="Opening Roblox Studio for the published place.",
-                captureOutput=False,
+        # A failure here (e.g. `open`/`start` not working) must not abort the
+        # rest of the flow — we still want to delete the place file, open VS
+        # Code, and start Rojo. Warn and continue instead of propagating.
+        try:
+            if platform == "win32":  # windows (any ver)
+                runCommand(
+                    ["cmd", "/c", "start", "", placeOpenString],
+                    step="Opening Roblox Studio for the published place.",
+                    captureOutput=False,
+                )
+            elif platform == "darwin":  # macos
+                runCommand(
+                    ["open", placeOpenString],
+                    step="Opening Roblox Studio for the published place.",
+                    captureOutput=False,
+                )
+        except SGFLError as err:
+            print(
+                f"{color.YELLOW}{color.BOLD}WARN{color.END} "
+                f"Could not open Roblox Studio automatically: {err.message} "
+                f"Continuing — open the place manually if needed."
             )
 
         deleteFile(PLACE_FILE_PATH)
