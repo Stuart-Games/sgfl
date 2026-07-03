@@ -10,6 +10,7 @@ Usage:
     py sidecar_extract.py <place.rbxl> [--json]
 """
 
+import base64
 import json
 import struct
 import sys
@@ -40,6 +41,8 @@ ALLOWLIST = {
     ("Workspace", "TouchesUseCollisionGroups"): 0x02,
     ("Workspace", "TouchEventsUseCollisionGroups"): 0x12,  # tri-state enum, not bool
     ("Workspace", "RejectCharacterDeletions"): 0x12,  # tri-state enum, not bool
+    # --- opaque blobs (script-unreachable state carried byte-exact) ---
+    ("Workspace", "CollisionGroupData"): 0x01,
 }
 
 # Cosmetic enum value -> name maps (extractor works without them)
@@ -99,6 +102,13 @@ def deinterleave(data, count, width):
 
 def decode_values(type_id, body, pos, count):
     """Decode `count` primitive values of `type_id` starting at pos. Returns list or None."""
+    if type_id == 0x01:  # String: sequential u32-length-prefixed byte blobs
+        out = []
+        for _ in range(count):
+            n = struct.unpack_from("<I", body, pos)[0]
+            out.append(body[pos + 4 : pos + 4 + n])
+            pos += 4 + n
+        return out
     if type_id == 0x02:  # Bool: raw bytes
         return [bool(body[pos + i]) for i in range(count)]
     if type_id == 0x03:  # Int32: interleaved BE, zigzag
@@ -206,7 +216,13 @@ def main():
 
     if as_json:
         payload = {
-            f"{c}.{p}": {"type": TYPE_NAMES.get(r["typeId"], hex(r["typeId"])), "values": r["values"]}
+            f"{c}.{p}": {
+                "type": TYPE_NAMES.get(r["typeId"], hex(r["typeId"])),
+                "values": [
+                    {"base64": base64.b64encode(v).decode("ascii")} if isinstance(v, bytes) else v
+                    for v in r["values"]
+                ],
+            }
             for (c, p), r in results.items()
         }
         print(json.dumps({"extracted": payload, "problems": problems}, indent=2))
@@ -214,7 +230,10 @@ def main():
 
     print(f"=== sidecar extraction: {path}")
     for (cname, pname), r in sorted(results.items()):
-        values = r["values"]
+        values = [
+            f"<{len(v)} bytes: {base64.b64encode(v).decode('ascii')[:48]}...>" if isinstance(v, bytes) else v
+            for v in r["values"]
+        ]
         rendered = values[0] if len(values) == 1 else values
         if r["typeId"] == 0x12 and len(values) == 1:
             name = ENUM_NAMES.get(pname, {}).get(values[0])
