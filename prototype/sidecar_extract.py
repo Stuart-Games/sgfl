@@ -45,6 +45,19 @@ ALLOWLIST = {
     ("Workspace", "CollisionGroupData"): 0x01,
 }
 
+# Allowlist keys that are script-readable: used purely as decoder canaries
+# (extracted value must match the in-session value bit-exactly). Everything
+# else in ALLOWLIST is sidecar-only (script-unreachable) state.
+ANCHORS = {
+    ("Workspace", "Gravity"),
+    ("Workspace", "FallenPartsDestroyHeight"),
+    ("Workspace", "AirDensity"),
+    ("Workspace", "StreamingEnabled"),
+    ("Workspace", "ModelStreamingMode"),
+    ("Workspace", "Retargeting"),
+    ("Workspace", "ClientAnimatorThrottling"),
+}
+
 # Cosmetic enum value -> name maps (extractor works without them)
 ENUM_NAMES = {
     "StreamOutBehavior": {0: "Default", 1: "LowMemory", 2: "Opportunistic"},
@@ -134,7 +147,12 @@ def decode_values(type_id, body, pos, count):
     return None
 
 
-def extract(path):
+def extract(path, allowlist=None):
+    """Extract allowlisted properties. `allowlist` defaults to the static
+    ALLOWLIST; pass a merged dict to add dynamically discovered hidden props
+    (expected typeId None = accept any decodable primitive)."""
+    if allowlist is None:
+        allowlist = ALLOWLIST
     data = open(path, "rb").read()
     if data[: len(MAGIC)] != MAGIC:
         sys.exit(f"ERROR: not a Roblox binary file (magic mismatch): {path}")
@@ -142,7 +160,7 @@ def extract(path):
     pos = 32
     class_names = {}  # classId -> name
     class_counts = {}  # classId -> instance count
-    wanted_classes = {c for c, _ in ALLOWLIST}
+    wanted_classes = {c for c, _ in allowlist}
     results = {}
     problems = []
 
@@ -180,12 +198,12 @@ def extract(path):
                 continue
             pname, p = read_string(body, 4)
             key = (cname, pname)
-            if key not in ALLOWLIST:
+            if key not in allowlist:
                 continue
             type_id = body[p]
             p += 1
             count = class_counts.get(class_id, 0)
-            expected = ALLOWLIST[key]
+            expected = allowlist[key]
             if expected is not None and type_id != expected:
                 problems.append(
                     f"{cname}.{pname}: type changed! expected 0x{expected:02x} "
@@ -202,7 +220,7 @@ def extract(path):
             break
 
     # Report allowlist entries that never appeared (property not serialized / renamed)
-    for key in ALLOWLIST:
+    for key in allowlist:
         if key not in results and not any(key[1] in prob for prob in problems):
             problems.append(f"{key[0]}.{key[1]}: not found in file (renamed, removed, or default-omitted)")
 
