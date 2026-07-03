@@ -51,7 +51,7 @@ All Python under [src/sgfl/](src/sgfl/) (hatchling `src/` layout, entry point `s
 - [sidecar.py](src/sgfl/sidecar.py) — dependency-free binary `.rbxl` chunk parser: `extract` (allowlist → values) and `patchFile` (values → uncompressed chunk re-emission). Only the chunk container and six primitive type encodings are parsed; everything else is opaque bytes. `ALLOWLIST`/`ANCHORS` are the static prop sets; the dynamic part comes from the projection task at runtime.
 - [lua/cloud/projection.luau](src/sgfl/lua/cloud/projection.luau) / [lua/cloud/apply.luau](src/sgfl/lua/cloud/apply.luau) — the in-engine scripts. The driver replaces `__SGFL_CONFIG__` (JSON) and, for apply, `__SGFL_POSTAPPLY__`. They must stay symmetric: every value encoder in projection needs a decoder in apply.
 - [json/default.assets.json](src/sgfl/json/default.assets.json), [json/default.project.json](src/sgfl/json/default.project.json), [misc/gitignore.txt](src/sgfl/misc/gitignore.txt) — init templates.
-- Prototyping history (probes, standalone drivers, validation evidence) lives under [prototype/](prototype/) and its README.
+- The prototyping history (probes, standalone drivers, validation evidence) that produced this pipeline was removed after the v2.0 cutover; it remains in git history under `prototype/` on the `prototype/cloud-projection` branch.
 
 ## Environment Variables
 
