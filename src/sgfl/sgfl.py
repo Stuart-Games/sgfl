@@ -108,7 +108,14 @@ def start(
         "start",
         detailed=detailed,
         pullEnabled=pull,
-        envDiagnosticKeys=["PLACE_ID", "UNIVERSE_ID", "PUBLISH_KEY", "USER_ID"],
+        envDiagnosticKeys=[
+            "PLACE_ID",
+            "UNIVERSE_ID",
+            "PUBLISH_KEY",
+            "DOWNLOAD_KEY",
+            "EXECUTION_KEY",
+            "USER_ID",
+        ],
         fn=lambda: startPlace(pull),
     )
 
@@ -146,8 +153,35 @@ def save(
         "save",
         detailed=detailed,
         pullEnabled=False,
-        envDiagnosticKeys=["PLACE_ID", "DOWNLOAD_KEY"],
+        envDiagnosticKeys=["PLACE_ID", "UNIVERSE_ID", "DOWNLOAD_KEY", "EXECUTION_KEY"],
         fn=savePlace,
+    )
+
+
+def migrate(
+    env: Annotated[
+        Optional[str],
+        typer.Argument(
+            help="Optional env name. If given, loads .env.<env> instead of .env.",
+        ),
+    ] = None,
+    detailed: Annotated[
+        bool,
+        typer.Option(
+            "--detailed",
+            "-d",
+            help="Print detailed .env and API key diagnostics if an error occurs.",
+        ),
+    ] = False,
+):
+    """Convert a legacy (.rbxm) project to the new cloud-pipeline format."""
+    _loadEnv(env, None)
+    _runTask(
+        "migrate",
+        detailed=detailed,
+        pullEnabled=False,
+        envDiagnosticKeys=["PLACE_ID", "UNIVERSE_ID", "DOWNLOAD_KEY", "EXECUTION_KEY"],
+        fn=migratePlace,
     )
 
 
@@ -224,7 +258,7 @@ def publish(
         "publish",
         detailed=detailed,
         pullEnabled=False,
-        envDiagnosticKeys=["UNIVERSE_ID", "PUBLISH_KEY"],
+        envDiagnosticKeys=["UNIVERSE_ID", "PUBLISH_KEY", "DOWNLOAD_KEY", "EXECUTION_KEY"],
         fn=lambda: publishPlaces(
             env,
             dryRun=dryRun,
@@ -247,6 +281,13 @@ def authLoginCmd(
         Optional[str],
         typer.Option("--download-key", help="Set DOWNLOAD_KEY non-interactively."),
     ] = None,
+    executionKey: Annotated[
+        Optional[str],
+        typer.Option(
+            "--execution-key",
+            help="Set EXECUTION_KEY (Open Cloud key with the Luau Execution Sessions system) non-interactively.",
+        ),
+    ] = None,
     userId: Annotated[
         Optional[str],
         typer.Option("--user-id", help="Set USER_ID non-interactively."),
@@ -268,6 +309,7 @@ def authLoginCmd(
         fn=lambda: authLogin(
             publishKey=publishKey,
             downloadKey=downloadKey,
+            executionKey=executionKey,
             userId=userId,
         ),
     )

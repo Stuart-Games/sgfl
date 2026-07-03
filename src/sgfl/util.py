@@ -48,7 +48,7 @@ class SGFLError(Exception):
         self.diagnostics = diagnostics or {}
 
 
-API_ENV_KEYS = ["PUBLISH_KEY", "DOWNLOAD_KEY"]
+API_ENV_KEYS = ["PUBLISH_KEY", "DOWNLOAD_KEY", "EXECUTION_KEY"]
 ID_ENV_KEYS = ["PLACE_ID", "UNIVERSE_ID", "USER_ID"]
 
 _envSuffix: Optional[str] = None
@@ -74,13 +74,11 @@ def _toolDiagnosticsForTask(taskName: Optional[str], pullEnabled: bool) -> list[
     requiredTools: list[str] = []
 
     if taskName == "start":
-        requiredTools.extend(["lune", "rojo", "code"])
+        requiredTools.extend(["rojo", "code"])
         if pullEnabled:
             requiredTools.append("git")
-    elif taskName == "save":
-        requiredTools.append("lune")
     elif taskName == "publish":
-        requiredTools.extend(["lune", "rojo"])
+        requiredTools.append("rojo")
     elif taskName == "init":
         requiredTools.extend(["rokit"])
     elif taskName == "update":
@@ -332,19 +330,6 @@ def getAbsoluteFileURI(name: str) -> str:
     return os.path.join(BASE_DIR, name)
 
 
-def runLuauFile(name: str):
-    fileURI = getAbsoluteFileURI(name)
-    absolutePath = getAbsoluteFileURI("")
-    runCommand(
-        ["lune", "run", fileURI, absolutePath],
-        step=f"Running Luau workflow script: {name}",
-        suggestions=[
-            "Make sure Lune is installed and available in your PATH.",
-            "Check assets.json and source files referenced by the script.",
-        ],
-    )
-
-
 def runSilentSubprocess(arr: list[str]):
     runCommand(arr)
 
@@ -400,7 +385,7 @@ PLACE_FILE_PATH = getFileURI("Place.rbxl")
 ASSET_CONFIG_FILE_PATH = getFileURI("assets.json")
 CREDENTIALS_DIR = os.path.expanduser("~/.sgfl")
 CREDENTIALS_PATH = os.path.join(CREDENTIALS_DIR, "credentials")
-CREDENTIAL_KEYS = ["PUBLISH_KEY", "DOWNLOAD_KEY", "USER_ID"]
+CREDENTIAL_KEYS = ["PUBLISH_KEY", "DOWNLOAD_KEY", "EXECUTION_KEY", "USER_ID"]
 
 UPDATE_CACHE_PATH = os.path.join(CREDENTIALS_DIR, "update_check.json")
 UPDATE_CHECK_TTL_SECONDS = 24 * 60 * 60

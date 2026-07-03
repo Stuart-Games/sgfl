@@ -1,6 +1,4 @@
-import glob
 import getpass
-import shutil
 import sys
 import requests
 import typer
@@ -9,6 +7,7 @@ from urllib.parse import urlparse
 from typing import Optional
 from sys import platform
 from .util import *
+from . import cloud
 
 REQUEST_TIMEOUT_SECONDS = 30
 
@@ -126,34 +125,39 @@ def _withAuthorizationWarning(
     return [*baseSuggestions, warning]
 
 
-def _getAssetFolders() -> set[str]:
+def _loadAssetTable() -> dict:
     configPath = (
         ASSET_CONFIG_FILE_PATH
         if os.path.exists(ASSET_CONFIG_FILE_PATH)
         else getAbsoluteFileURI("json/default.assets.json")
     )
-    return {data["folder"] for data in getTableFromJsonFile(configPath).values()}
+    return getTableFromJsonFile(configPath)
 
 
-def _checkForOutdatedAssets():
-    folders = _getAssetFolders()
-    outdated = any(
-        glob.glob(f"{folder}/*.rbxmx")
-        for folder in folders
-        if os.path.isdir(folder)
-    )
-    if outdated:
+def _legacyEntryFiles(assetTable: dict) -> list[str]:
+    """Entry-named legacy files from the Lune pipeline ({folder}/{Entry}.rbxm
+    or .rbxmx). Exact names only — new-format blobs end in .sgfl.rbxm and
+    other files in shared asset folders are never touched."""
+    legacy: list[str] = []
+    for name, spec in assetTable.items():
+        for suffix in (".rbxm", ".rbxmx"):
+            path = f"{spec['folder']}/{name}{suffix}"
+            if os.path.isfile(path):
+                legacy.append(path)
+    return legacy
+
+
+def _checkForLegacyAssets(assetTable: dict):
+    legacy = _legacyEntryFiles(assetTable)
+    if legacy:
         raise SGFLError(
-            "Project assets are in the outdated XML format (.rbxmx).",
-            suggestions=["Run sgfl save to migrate assets to the binary format (.rbxm)."],
+            "This project still has legacy .rbxm asset files from the old pipeline.",
+            details=f"Found {len(legacy)} legacy entry file(s), e.g. {legacy[0]}.",
+            suggestions=[
+                "Run sgfl migrate to convert the project to the new format.",
+                "Older sgfl versions keep working on unmigrated projects if you are not ready.",
+            ],
         )
-
-
-def _deleteOutdatedAssets():
-    folders = _getAssetFolders()
-    for folder in folders:
-        for path in glob.glob(f"{folder}/*.rbxmx"):
-            os.remove(path)
 
 
 def _runRojoBuild():
@@ -173,9 +177,12 @@ def startPlace(pull: bool):
     placeId = getEnvSafe("PLACE_ID")
     universeId = getEnvSafe("UNIVERSE_ID")
     publishKey = getEnvSafe("PUBLISH_KEY")
+    downloadKey = getEnvSafe("DOWNLOAD_KEY")
+    executionKey = cloud.getExecutionKey()
     userId = getEnvSafe("USER_ID")
 
-    _checkForOutdatedAssets()
+    assetTable = _loadAssetTable()
+    _checkForLegacyAssets(assetTable)
 
     # pull and build
     if pull:
@@ -190,279 +197,176 @@ def startPlace(pull: bool):
         )
 
     _runRojoBuild()
-    runLuauFile("lua/build.luau")
-
-    # make correct publish req to roblox
-    url = f"https://apis.roblox.com/universes/v1/{universeId}/places/{placeId}/versions?versionType=Published"
-    headers = {"x-api-key": publishKey, "Content-Type": "application/octet-stream"}
-
-    announceStep("Uploading built place file to Roblox.")
     try:
-        with open(PLACE_FILE_PATH, "rb") as f:
-            placeBinary = f.read()
-    except OSError as exc:
-        raise SGFLError(
-            "Failed to read generated Place.rbxl file.",
-            details=str(exc),
-            suggestions=[
-                "Check that rojo build and lua/build.luau completed successfully.",
-                "Verify that Place.rbxl can be created in the project root.",
-            ],
+        placeBinary = cloud.buildFinalPlace(
+            universeId=universeId,
+            basePlaceId=placeId,
+            executionKey=executionKey,
+            publishKey=publishKey,
+            downloadKey=downloadKey,
+            assetTable=assetTable,
+            placeFilePath=PLACE_FILE_PATH,
         )
-
-    try:
-        res = requests.post(
-            url, headers=headers, data=placeBinary, timeout=REQUEST_TIMEOUT_SECONDS
-        )
-    except requests.RequestException as exc:
-        raise SGFLError(
-            "Publish request to Roblox failed.",
-            details=str(exc),
-            suggestions=[
-                "Verify internet connectivity and try again.",
-                "Confirm your PLACE_ID, UNIVERSE_ID and PUBLISH_KEY values are valid.",
-            ],
-            diagnostics={
-                "HTTP diagnostics": _httpDiagnostics(
-                    method="POST",
-                    url=url,
-                    apiKeyName="PUBLISH_KEY",
-                    apiKey=publishKey,
-                    error=exc,
-                )
-            },
-        )
-
-    if res.status_code != 200:
-        suggestions = _withAuthorizationWarning(
-            [
-                "Confirm PLACE_ID and UNIVERSE_ID point to the correct place.",
-                "Regenerate your PUBLISH_KEY and ensure it has publish permissions.",
-                "Check that your account can edit the target place.",
-            ],
-            res.status_code,
-            usesApiKey=True,
-        )
-        raise SGFLError(
-            "Roblox rejected the publish request.",
-            details=f"HTTP {res.status_code}: {_responseReason(res)}",
-            suggestions=suggestions,
-            diagnostics={
-                "HTTP diagnostics": _httpDiagnostics(
-                    method="POST",
-                    url=url,
-                    apiKeyName="PUBLISH_KEY",
-                    apiKey=publishKey,
-                    response=res,
-                )
-            },
-        )
-    else:
-        placeOpenString = f"roblox-studio:1+userId:{userId}+task:EditPlace+placeId:{placeId}+universeId:{universeId}"
-
-        # open studio (generic window)
-        # A failure here (e.g. `open`/`start` not working) must not abort the
-        # rest of the flow — we still want to delete the place file, open VS
-        # Code, and start Rojo. Warn and continue instead of propagating.
-        try:
-            if platform == "win32":  # windows (any ver)
-                runCommand(
-                    ["cmd", "/c", "start", "", placeOpenString],
-                    step="Opening Roblox Studio for the published place.",
-                    captureOutput=False,
-                )
-            elif platform == "darwin":  # macos
-                runCommand(
-                    ["open", placeOpenString],
-                    step="Opening Roblox Studio for the published place.",
-                    captureOutput=False,
-                )
-        except SGFLError as err:
-            print(
-                f"{color.YELLOW}{color.BOLD}WARN{color.END} "
-                f"Could not open Roblox Studio automatically: {err.message} "
-                f"Continuing — open the place manually if needed."
-            )
-
+    finally:
         deleteFile(PLACE_FILE_PATH)
-        runCommand(
-            ["code", "."],
-            step="Opening project in VS Code.",
-            captureOutput=False,
-            shell=True,
+
+    versionNumber = cloud.uploadPlaceVersion(
+        universeId=universeId,
+        placeId=placeId,
+        publishKey=publishKey,
+        data=placeBinary,
+        versionType="Published",
+    )
+    announceStep(f"Published place version {versionNumber}.")
+
+    placeOpenString = f"roblox-studio:1+userId:{userId}+task:EditPlace+placeId:{placeId}+universeId:{universeId}"
+
+    # open studio (generic window)
+    # A failure here (e.g. `open`/`start` not working) must not abort the
+    # rest of the flow — we still want to open VS Code and start Rojo.
+    # Warn and continue instead of propagating.
+    try:
+        if platform == "win32":  # windows (any ver)
+            runCommand(
+                ["cmd", "/c", "start", "", placeOpenString],
+                step="Opening Roblox Studio for the published place.",
+                captureOutput=False,
+            )
+        elif platform == "darwin":  # macos
+            runCommand(
+                ["open", placeOpenString],
+                step="Opening Roblox Studio for the published place.",
+                captureOutput=False,
+            )
+    except SGFLError as err:
+        print(
+            f"{color.YELLOW}{color.BOLD}WARN{color.END} "
+            f"Could not open Roblox Studio automatically: {err.message} "
+            f"Continuing — open the place manually if needed."
         )
-        announceStep("Starting Rojo server.")
-        runCommand(
-            ["rojo", "serve"],
-            suggestions=[
-                "Install Rojo or ensure it is available on PATH.",
-                "Run rojo serve manually to inspect detailed setup issues.",
-            ],
-            captureOutput=False,
-        )
+
+    runCommand(
+        ["code", "."],
+        step="Opening project in VS Code.",
+        captureOutput=False,
+        shell=True,
+    )
+    announceStep("Starting Rojo server.")
+    runCommand(
+        ["rojo", "serve"],
+        suggestions=[
+            "Install Rojo or ensure it is available on PATH.",
+            "Run rojo serve manually to inspect detailed setup issues.",
+        ],
+        captureOutput=False,
+    )
 
 
 def savePlace():
     announceStep("Checking environment configuration for save flow.")
     placeId = getEnvSafe("PLACE_ID")
+    universeId = getEnvSafe("UNIVERSE_ID")
     downloadKey = getEnvSafe("DOWNLOAD_KEY")
+    executionKey = cloud.getExecutionKey()
 
-    # make correct publish req to roblox
-    url = f"https://apis.roblox.com/asset-delivery-api/v1/assetId/{placeId}"
-    headers = {"x-api-key": downloadKey}
+    assetTable = _loadAssetTable()
+    _checkForLegacyAssets(assetTable)
 
-    announceStep("Requesting secure download URL from Roblox.")
-    try:
-        res = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
-    except requests.RequestException as exc:
-        raise SGFLError(
-            "Failed to request place download URL.",
-            details=str(exc),
-            suggestions=[
-                "Verify internet connectivity and try again.",
-                "Confirm DOWNLOAD_KEY and PLACE_ID are valid.",
-            ],
-            diagnostics={
-                "HTTP diagnostics": _httpDiagnostics(
-                    method="GET",
-                    url=url,
-                    apiKeyName="DOWNLOAD_KEY",
-                    apiKey=downloadKey,
-                    error=exc,
-                )
-            },
-        )
+    placeVersion = cloud.runProjectionSave(
+        universeId=universeId,
+        placeId=placeId,
+        executionKey=executionKey,
+        downloadKey=downloadKey,
+        assetTable=assetTable,
+    )
 
-    if res.status_code != 200:
-        suggestions = _withAuthorizationWarning(
-            [
-                "Check DOWNLOAD_KEY permissions for asset delivery.",
-                "Ensure PLACE_ID refers to an accessible place.",
-            ],
-            res.status_code,
-            usesApiKey=True,
-        )
-        raise SGFLError(
-            "Roblox did not return a download URL.",
-            details=f"HTTP {res.status_code}: {_responseReason(res)}",
-            suggestions=suggestions,
-            diagnostics={
-                "HTTP diagnostics": _httpDiagnostics(
-                    method="GET",
-                    url=url,
-                    apiKeyName="DOWNLOAD_KEY",
-                    apiKey=downloadKey,
-                    response=res,
-                )
-            },
-        )
-
-    try:
-        payload = res.json()
-    except ValueError:
-        raise SGFLError(
-            "Roblox returned an invalid JSON payload.",
-            details="Expected a JSON response containing 'location'.",
-            suggestions=[
-                "Retry the request in case of a temporary Roblox API issue.",
-                "Inspect API response manually to confirm the endpoint output.",
-            ],
-            diagnostics={
-                "HTTP diagnostics": _httpDiagnostics(
-                    method="GET",
-                    url=url,
-                    apiKeyName="DOWNLOAD_KEY",
-                    apiKey=downloadKey,
-                    response=res,
-                )
-            },
-        )
-
-    downloadUrl = payload.get("location")
-
-    if not downloadUrl:
-        raise SGFLError(
-            "Roblox response did not include a download location.",
-            details=f"Response payload keys: {', '.join(payload.keys()) if isinstance(payload, dict) else 'non-dict payload'}",
-            suggestions=[
-                "Verify DOWNLOAD_KEY has the right scope.",
-                "Confirm the place has a published version available.",
-            ],
-            diagnostics={
-                "HTTP diagnostics": _httpDiagnostics(
-                    method="GET",
-                    url=url,
-                    apiKeyName="DOWNLOAD_KEY",
-                    apiKey=downloadKey,
-                    response=res,
-                )
-            },
-        )
-
-    announceStep("Downloading place file data.")
-    try:
-        downloadRes = requests.get(downloadUrl, timeout=REQUEST_TIMEOUT_SECONDS)
-    except requests.RequestException as exc:
-        raise SGFLError(
-            "Failed to download place data from Roblox.",
-            details=str(exc),
-            suggestions=[
-                "Retry the save command.",
-                "Check your network connection and VPN/proxy settings.",
-            ],
-            diagnostics={
-                "HTTP diagnostics": [
-                    f"request: GET {downloadUrl}",
-                    f"request error type: {type(exc).__name__}",
-                    f"request error text: {exc}",
-                ]
-            },
-        )
-
-    if downloadRes.status_code != 200:
-        suggestions = _withAuthorizationWarning(
-            [
-                "Retry download, then inspect response details for permission or availability issues."
-            ],
-            downloadRes.status_code,
-            usesApiKey=False,
-        )
-        raise SGFLError(
-            "Place file download failed.",
-            details=f"HTTP {downloadRes.status_code}: {_responseReason(downloadRes)}",
-            suggestions=suggestions,
-            diagnostics={
-                "HTTP diagnostics": [
-                    f"request: GET {downloadUrl}",
-                    f"status: {downloadRes.status_code}",
-                    f"content-type: {downloadRes.headers.get('Content-Type', 'missing')}",
-                ]
-            },
-        )
-
-    placeData = downloadRes.content
-
-    # write to place file
-    announceStep("Writing downloaded place file to disk.")
-    try:
-        with open(PLACE_FILE_PATH, "wb") as f:
-            f.write(placeData)
-    except OSError as exc:
-        raise SGFLError(
-            "Failed to write Place.rbxl to disk.",
-            details=str(exc),
-            suggestions=[
-                "Check filesystem permissions in the project directory.",
-                "Ensure there is enough disk space available.",
-            ],
-        )
-
-    runLuauFile("lua/importAssets.luau")
-    _deleteOutdatedAssets()
-
-    deleteFile(PLACE_FILE_PATH)
     print(
-        f"{color.GREEN}{color.BOLD}SUCCESS{color.END} Saved place data to the local file system."
+        f"{color.GREEN}{color.BOLD}SUCCESS{color.END} "
+        f"Saved place version {placeVersion} to the local file system."
+    )
+
+
+def migratePlace():
+    announceStep("Checking environment configuration for migration.")
+    placeId = getEnvSafe("PLACE_ID")
+    universeId = getEnvSafe("UNIVERSE_ID")
+    downloadKey = getEnvSafe("DOWNLOAD_KEY")
+    executionKey = cloud.getExecutionKey()
+
+    assetTable = _loadAssetTable()
+    legacyFiles = _legacyEntryFiles(assetTable)
+    newFiles = [
+        f"{spec['folder']}/{name}.sgfl"
+        for name, spec in assetTable.items()
+        if os.path.isfile(f"{spec['folder']}/{name}.sgfl")
+    ]
+
+    if not legacyFiles:
+        if newFiles:
+            print(
+                f"{color.GREEN}{color.BOLD}NOOP{color.END} "
+                f"This project is already on the new format ({len(newFiles)} entry files). Nothing to migrate."
+            )
+            return
+        announceStep("No legacy asset files found — treating this as a first-time projection.")
+
+    if legacyFiles:
+        if not sys.stdin.isatty():
+            raise SGFLError(
+                "Refusing to migrate in a non-interactive session.",
+                details="sgfl migrate replaces local asset files and requires a typed confirmation.",
+                suggestions=["Run sgfl migrate from an interactive terminal."],
+            )
+
+        print()
+        print(
+            f"{color.CYAN}{color.BOLD}INFO{color.END} Migration will project the place "
+            f"currently on Roblox (place {placeId}) into the new .sgfl format, then delete "
+            f"these {len(legacyFiles)} legacy file(s):"
+        )
+        for path in legacyFiles:
+            print(f"        - {path}")
+        print(
+            f"{color.YELLOW}{color.BOLD}WARN{color.END} Any local changes in those files that were "
+            f"never published will be lost (git history is your recovery path)."
+        )
+        print()
+
+        expected = "MIGRATE"
+        try:
+            entered = input(f'Type "{expected}" to confirm (or anything else to abort): ')
+        except EOFError:
+            entered = ""
+        if entered.strip() != expected:
+            announceStep("Aborted by user.")
+            raise typer.Exit(code=0)
+
+    placeVersion = cloud.runProjectionSave(
+        universeId=universeId,
+        placeId=placeId,
+        executionKey=executionKey,
+        downloadKey=downloadKey,
+        assetTable=assetTable,
+    )
+
+    for path in legacyFiles:
+        deleteFile(path)
+    if legacyFiles:
+        announceStep(f"Deleted {len(legacyFiles)} legacy entry file(s).")
+
+    if os.path.isfile(getFileURI("postbuild.luau")):
+        print(
+            f"{color.YELLOW}{color.BOLD}NEXT{color.END} This project has a postbuild.luau hook. "
+            f"The new pipeline does not run it — port anything still needed to postapply.luau "
+            f"(plain Luau, `return function(game)`, runs inside the cloud session before the "
+            f"place is saved). StyleLink re-linking is no longer needed: cross-entry references "
+            f"are preserved natively."
+        )
+
+    print(
+        f"\n{color.GREEN}{color.BOLD}SUCCESS{color.END} "
+        f"Migrated to the new format (projected place version {placeVersion}). "
+        f"sgfl start / save / publish now work as before."
     )
 
 
@@ -514,11 +418,11 @@ def initPlace():
 
     assetTable = getTableFromJsonFile("json/default.assets.json")
 
+    # Entry files are created by the first `sgfl save`; a publish with no
+    # entry file for an entry simply keeps the base content, so a fresh
+    # project needs only the folders.
     for name, data in assetTable.items():
         createDirIfNotExist(data["folder"])
-        defaultSrc = getAbsoluteFileURI(f"defaults/{name}.rbxm")
-        if os.path.isfile(defaultSrc):
-            shutil.copy2(defaultSrc, f"{data['folder']}/{name}.rbxm")
 
     # https://stackoverflow.com/a/12309296
     with open("assets.json", "w", encoding="utf-8") as f:
@@ -544,7 +448,6 @@ def initPlace():
             g.writelines(text)
 
     runCommand(["rokit", "init"], step="Initializing Rokit toolchain.")
-    runCommand(["rokit", "add", "lune"], step="Adding Lune to toolchain.")
     runCommand(["rokit", "add", "rojo"], step="Adding Rojo to toolchain.")
     runCommand(["rokit", "install"], step="Installing toolchain dependencies.")
 
@@ -553,7 +456,7 @@ def initPlace():
             f"{color.YELLOW}{color.BOLD}NEXT{color.END} "
             f"No developer credentials found at {CREDENTIALS_PATH}. "
             f"Run {color.BOLD}sgfl auth login{color.END} to set your "
-            f"PUBLISH_KEY / DOWNLOAD_KEY / USER_ID before {color.BOLD}sgfl start{color.END}."
+            f"PUBLISH_KEY / DOWNLOAD_KEY / EXECUTION_KEY / USER_ID before {color.BOLD}sgfl start{color.END}."
         )
 
     print(
@@ -582,10 +485,14 @@ def _promptCredential(label: str, currentValue: Optional[str], hideInput: bool) 
 def authLogin(
     publishKey: Optional[str] = None,
     downloadKey: Optional[str] = None,
+    executionKey: Optional[str] = None,
     userId: Optional[str] = None,
 ):
     interactive = (
-        publishKey is None and downloadKey is None and userId is None
+        publishKey is None
+        and downloadKey is None
+        and executionKey is None
+        and userId is None
     )
 
     if interactive:
@@ -595,7 +502,7 @@ def authLogin(
                 details="sgfl auth login requires a TTY when called without flags.",
                 suggestions=[
                     "Run sgfl auth login from an interactive terminal.",
-                    "For scripts, pass --publish-key / --download-key / --user-id directly.",
+                    "For scripts, pass --publish-key / --download-key / --execution-key / --user-id directly.",
                 ],
             )
 
@@ -607,15 +514,17 @@ def authLogin(
 
         publishKey = _promptCredential("PUBLISH_KEY", current["PUBLISH_KEY"], hideInput=True)
         downloadKey = _promptCredential("DOWNLOAD_KEY", current["DOWNLOAD_KEY"], hideInput=True)
+        executionKey = _promptCredential("EXECUTION_KEY", current["EXECUTION_KEY"], hideInput=True)
         userId = _promptCredential("USER_ID", current["USER_ID"], hideInput=False)
 
-        if publishKey is None and downloadKey is None and userId is None:
+        if publishKey is None and downloadKey is None and executionKey is None and userId is None:
             print(f"\n{color.YELLOW}{color.BOLD}NOOP{color.END} No credentials changed.")
             return
 
     values = {
         "PUBLISH_KEY": publishKey,
         "DOWNLOAD_KEY": downloadKey,
+        "EXECUTION_KEY": executionKey,
         "USER_ID": userId,
     }
 
@@ -687,12 +596,12 @@ def authStatus():
             notes.append("contains leading/trailing whitespace")
         if key == "USER_ID" and not trimmed.isdigit():
             notes.append("should be numeric")
-        if key in ("PUBLISH_KEY", "DOWNLOAD_KEY") and len(trimmed) < 16:
+        if key in ("PUBLISH_KEY", "DOWNLOAD_KEY", "EXECUTION_KEY") and len(trimmed) < 16:
             notes.append("looks unusually short for an API key")
 
         display = (
             maskSecret(trimmed)
-            if key in ("PUBLISH_KEY", "DOWNLOAD_KEY")
+            if key in ("PUBLISH_KEY", "DOWNLOAD_KEY", "EXECUTION_KEY")
             else trimmed
         )
         line = f"  - {key}: {color.GREEN}SET{color.END} value={display} (len={len(trimmed)})"
@@ -794,7 +703,8 @@ def publishPlaces(
             )
         places = {name: places[name] for name in normalized}
 
-    _checkForOutdatedAssets()
+    assetTable = _loadAssetTable()
+    _checkForLegacyAssets(assetTable)
 
     if noBuild and not os.path.exists(PLACE_FILE_PATH):
         raise SGFLError(
@@ -819,7 +729,7 @@ def publishPlaces(
         )
     else:
         summaryLines.append(
-            f"{color.CYAN}{color.BOLD}INFO{color.END} Place.rbxl will be built fresh via rojo + lua/build.luau."
+            f"{color.CYAN}{color.BOLD}INFO{color.END} The place will be built fresh via rojo + the cloud apply pipeline."
         )
     if dryRun:
         summaryLines.append(f"{color.YELLOW}{color.BOLD}DRY-RUN{color.END} no upload will be performed.")
@@ -845,20 +755,24 @@ def publishPlaces(
 
     if not noBuild:
         _runRojoBuild()
-        runLuauFile("lua/build.luau")
 
+    # Saved base versions are created on one place; the final bytes are then
+    # uploaded to every declared place. Prefer 'main' as the base.
+    baseName = "main" if "main" in places else sorted(places.keys())[0]
+    executionKey = cloud.getExecutionKey()
+    downloadKey = getEnvSafe("DOWNLOAD_KEY")
     try:
-        with open(PLACE_FILE_PATH, "rb") as f:
-            placeBinary = f.read()
-    except OSError as exc:
-        raise SGFLError(
-            "Failed to read generated Place.rbxl file.",
-            details=str(exc),
-            suggestions=[
-                "Check that rojo build and lua/build.luau completed successfully.",
-                "Re-run without --no-build to regenerate Place.rbxl.",
-            ],
+        placeBinary = cloud.buildFinalPlace(
+            universeId=universeId,
+            basePlaceId=places[baseName],
+            executionKey=executionKey,
+            publishKey=publishKey,
+            downloadKey=downloadKey,
+            assetTable=assetTable,
+            placeFilePath=PLACE_FILE_PATH,
         )
+    finally:
+        deleteFile(PLACE_FILE_PATH)
 
     failures: list[dict] = []
     for name in sorted(places.keys()):

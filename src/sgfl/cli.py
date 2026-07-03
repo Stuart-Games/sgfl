@@ -1,12 +1,13 @@
 import typer
 
-from .sgfl import start, save, init, publish, update, authLoginCmd, authStatusCmd
+from .sgfl import start, save, init, publish, migrate, update, authLoginCmd, authStatusCmd
 
 app = typer.Typer(pretty_exceptions_enable=False)
 app.command()(start)
 app.command()(save)
 app.command()(init)
 app.command()(publish)
+app.command()(migrate)
 app.command()(update)
 
 authApp = typer.Typer(
