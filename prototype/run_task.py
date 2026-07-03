@@ -55,7 +55,14 @@ def main():
 
     apiKey = os.environ.get("SGFL_EXECUTION_KEY")
     if not apiKey:
-        sys.exit("ERROR: set SGFL_EXECUTION_KEY to an API key with luau-execution-session scopes")
+        keyPath = os.path.join(os.path.expanduser("~"), ".sgfl", "execution.key")
+        if os.path.isfile(keyPath):
+            with open(keyPath, "r", encoding="utf-8") as f:
+                apiKey = f.read().strip()
+    if not apiKey:
+        sys.exit(
+            "ERROR: no API key. Set SGFL_EXECUTION_KEY or write the key to ~/.sgfl/execution.key"
+        )
 
     with open(args.script, "r", encoding="utf-8") as f:
         scriptSource = f.read()
