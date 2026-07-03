@@ -97,10 +97,13 @@ def buildConfig(projectDir):
     }
 
 
-def runProjectionTask(scriptSource, universeId, placeId, apiKey):
+def runProjectionTask(scriptSource, universeId, placeId, apiKey, version=None):
     """Create the task with binary output, poll to completion, return (task, containerBytes)."""
     headers = {"x-api-key": apiKey}
-    createUrl = f"{BASE}/universes/{universeId}/places/{placeId}/luau-execution-session-tasks"
+    placePath = f"universes/{universeId}/places/{placeId}"
+    if version is not None:
+        placePath += f"/versions/{version}"
+    createUrl = f"{BASE}/{placePath}/luau-execution-session-tasks"
     response = requests.post(
         createUrl,
         headers=headers,
@@ -169,6 +172,8 @@ def main():
     parser.add_argument("--project", required=True, help="project directory (assets.json, .env, ...)")
     parser.add_argument("--dry-run", action="store_true", help="run the task but do not write project files")
     parser.add_argument("--keep", help="also save the raw container to this path")
+    parser.add_argument("--out-dir", help="write files here instead of the project directory")
+    parser.add_argument("--version", help="pin the projection to a specific place version (default: latest)")
     args = parser.parse_args()
 
     projectDir = os.path.abspath(args.project)
@@ -190,7 +195,7 @@ def main():
     scriptSource = scriptSource.replace("__SGFL_CONFIG__", configJson)
 
     apiKey = getExecutionKey()
-    task, container = runProjectionTask(scriptSource, universeId, placeId, apiKey)
+    task, container = runProjectionTask(scriptSource, universeId, placeId, apiKey, args.version)
     if args.keep:
         with open(args.keep, "wb") as f:
             f.write(container)
@@ -211,6 +216,11 @@ def main():
     for entryName, info in hiddenRoots.items():
         for propName in info["props"]:
             dynamicAllowlist.setdefault((info["className"], propName), None)
+    # service-root attribute blobs (carry CoreScript-gated RBX_* migration
+    # state byte-exact; root attributes are excluded from the text projection)
+    for entry in config["entries"]:
+        if "." not in entry["robloxPath"]:
+            dynamicAllowlist.setdefault((entry["robloxPath"], "AttributesSerialize"), 0x01)
 
     # --- sidecar: download the exact version the task saw and extract ---
     print(f"\nDownloading place version {placeVersion} for sidecar extraction...")
@@ -223,6 +233,9 @@ def main():
     finally:
         os.remove(tmpPath)
     for problem in problems:
+        # services with no attributes simply have no chunk — not a problem
+        if "AttributesSerialize: not found" in problem:
+            continue
         print(f"  WARN(sidecar): {problem}")
 
     # anchor canary: extracted binary values must match in-session values
@@ -277,8 +290,9 @@ def main():
         return
 
     print()
+    outDir = os.path.abspath(args.out_dir) if args.out_dir else projectDir
     for name, data in sorted(files.items()):
-        target = os.path.join(projectDir, name.replace("/", os.sep))
+        target = os.path.join(outDir, name.replace("/", os.sep))
         os.makedirs(os.path.dirname(target), exist_ok=True)
         with open(target, "wb") as f:
             f.write(data)

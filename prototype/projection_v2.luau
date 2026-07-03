@@ -172,7 +172,12 @@ end
 ------------------------------------------------------------------------------
 
 local function escapeSegment(name: string): string
-	local out = name:gsub("\\", "\\\\"):gsub("/", "\\/"):gsub("\n", "\\n"):gsub("\r", "\\r"):gsub("\t", "\\t")
+	local out = name:gsub("\\", "\\\\")
+		:gsub("/", "\\/")
+		:gsub(":", "\\:")
+		:gsub("\n", "\\n")
+		:gsub("\r", "\\r")
+		:gsub("\t", "\\t")
 	return out
 end
 
@@ -560,11 +565,17 @@ local function projectInstance(inst: Instance, pathText: string, out: { string }
 		special.extra(inst, out)
 	end
 
-	-- attributes (sorted)
+	-- attributes (sorted). Service roots are special: their attributes
+	-- include Roblox-internal RBX_* migration state that is CoreScript-gated
+	-- on write yet load-bearing (e.g. Lighting's technology migration flags),
+	-- so the whole AttributesSerialize blob rides the binary sidecar instead
+	-- of the text projection.
 	local attrNames = {}
-	local attrs = inst:GetAttributes()
+	local attrs = if isRoot and inst.Parent == game then {} else inst:GetAttributes()
 	for name in attrs do
-		table.insert(attrNames, name)
+		if name:sub(1, 4) ~= "RBX_" then
+			table.insert(attrNames, name)
+		end
 	end
 	table.sort(attrNames)
 	for _, name in attrNames do
@@ -621,6 +632,31 @@ local function resolveEntryRoot(robloxPath: string): (Instance?, string?)
 	return folder, nil
 end
 
+-- children in canonical projection order: non-creatable singletons first
+-- (sorted by ClassName then Name) since their live position is engine
+-- history the apply side cannot reproduce (their Parent is locked), then
+-- everything else in document order
+local function canonicalChildren(inst: Instance): { Instance }
+	local locked, normal = {}, {}
+	for _, child in inst:GetChildren() do
+		if defaultsOf(child.ClassName) == false then
+			table.insert(locked, child)
+		else
+			table.insert(normal, child)
+		end
+	end
+	table.sort(locked, function(a, b)
+		if a.ClassName ~= b.ClassName then
+			return a.ClassName < b.ClassName
+		end
+		return a.Name < b.Name
+	end)
+	for _, child in normal do
+		table.insert(locked, child)
+	end
+	return locked
+end
+
 local function projectEntryText(root: Instance, rootAbsolute: { string }): string
 	local out = {}
 	local entryRoot = root
@@ -646,7 +682,7 @@ local function projectEntryText(root: Instance, rootAbsolute: { string }): strin
 	projectInstance(root, ".", out, true)
 
 	local function visit(inst: Instance, pathText: string, absolute: { string })
-		for _, child in inst:GetChildren() do
+		for _, child in canonicalChildren(inst) do
 			-- non-Archivable = engine-injected session-only content (default
 			-- PlayerModule etc.); no serializer persists it and neither do we
 			if not child.Archivable then
@@ -688,7 +724,7 @@ local function projectEntryBlob(root: Instance): (string, buffer?)
 	projectInstance(root, ".", out, true)
 
 	local children = {}
-	for _, child in root:GetChildren() do
+	for _, child in canonicalChildren(root) do
 		if not child.Archivable then
 			continue
 		end

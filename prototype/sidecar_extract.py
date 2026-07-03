@@ -43,6 +43,9 @@ ALLOWLIST = {
     ("Workspace", "RejectCharacterDeletions"): 0x12,  # tri-state enum, not bool
     # --- opaque blobs (script-unreachable state carried byte-exact) ---
     ("Workspace", "CollisionGroupData"): 0x01,
+    # --- serialized but NOT enumerated by ReflectionService (invisible to the
+    # dynamic sweep) — the engine derives visible state from these at load ---
+    ("Lighting", "Technology"): 0x12,  # drives LightingStyle/PrioritizeLightingQuality
 }
 
 # Allowlist keys that are script-readable: used purely as decoder canaries
