@@ -12,7 +12,8 @@
 	  [u32 manifestLen][manifest JSON][file data ...]
 	manifest = { placeVersion, files = { {name, offset, size} }, warnings }
 
-	The driver replaces __SGFL_CONFIG__ with JSON:
+	The driver fills the CONFIG placeholder below (which must appear exactly
+	once in this file — never write the token in comments) with JSON:
 	  {
 	    "entries": [ {"name","folder","robloxPath","format"} ],   -- format: "text"|"blob"
 	    "rojoPaths": [ "StarterPlayer/StarterPlayerScripts/Client", ... ],

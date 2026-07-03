@@ -11,8 +11,11 @@
 	every entry; pass 2 resolves Instance refs (entry-relative and absolute)
 	after everything exists.
 
-	The driver replaces __SGFL_CONFIG__ with the same config JSON as the
-	projection, and __SGFL_POSTAPPLY__ with `nil` or `function(game) ... end`.
+	The driver fills the CONFIG placeholder below with the same config JSON
+	as the projection, and the POSTAPPLY placeholder with `nil` or the
+	inlined postapply.luau hook. The placeholder tokens must appear exactly
+	once in this file — never write them in comments (the driver's
+	replacement is global, and loadCloudScript enforces the count).
 
 	[!sidecar ...] blocks are ignored here — the driver patches those values
 	into the saved binary afterwards.

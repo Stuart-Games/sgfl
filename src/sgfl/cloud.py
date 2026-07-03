@@ -364,10 +364,20 @@ def loadCloudScript(name: str, config: dict, postapplySource: Optional[str] = No
     path = getAbsoluteFileURI(f"lua/cloud/{name}")
     with open(path, "r", encoding="utf-8") as f:
         source = f.read()
-    if "__SGFL_CONFIG__" not in source:
-        raise SGFLError(f"Cloud script {name} is missing the __SGFL_CONFIG__ placeholder.")
+    # Replacement is global, so a placeholder token appearing anywhere else
+    # (e.g. mentioned in a comment) would get the payload spliced in twice
+    # and corrupt the script — demand exactly one occurrence.
+    if source.count("__SGFL_CONFIG__") != 1:
+        raise SGFLError(
+            f"Cloud script {name} must contain the __SGFL_CONFIG__ placeholder exactly once."
+        )
     source = source.replace("__SGFL_CONFIG__", json.dumps(config))
-    if "__SGFL_POSTAPPLY__" in source:
+    postapplyCount = source.count("__SGFL_POSTAPPLY__")
+    if postapplyCount > 1:
+        raise SGFLError(
+            f"Cloud script {name} must contain the __SGFL_POSTAPPLY__ placeholder exactly once."
+        )
+    if postapplyCount == 1:
         if postapplySource is not None:
             source = source.replace(
                 "__SGFL_POSTAPPLY__", "(function()\n" + postapplySource + "\nend)()"
