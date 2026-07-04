@@ -447,6 +447,11 @@ def initPlace():
         with open(".gitignore", "w") as g:
             g.writelines(text)
 
+    with open(getAbsoluteFileURI("misc/gitattributes.txt"), "r") as f:
+        text = f.readlines()
+        with open(".gitattributes", "w") as g:
+            g.writelines(text)
+
     runCommand(["rokit", "init"], step="Initializing Rokit toolchain.")
     runCommand(["rokit", "add", "rojo"], step="Adding Rojo to toolchain.")
     runCommand(["rokit", "install"], step="Installing toolchain dependencies.")

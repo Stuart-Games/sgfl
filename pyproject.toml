@@ -8,7 +8,7 @@ sgfl = "sgfl.cli:app"
 [project]
 dependencies = ["typer", "requests", "python-dotenv"]
 name = "sgfl"
-version = "2.0.1"
+version = "2.0.2"
 authors = [{ name = "devvf" }]
 maintainers = [{ name = "stuart-2202" }]
 description = "A package for managing the Stuart Games Roblox workflow."

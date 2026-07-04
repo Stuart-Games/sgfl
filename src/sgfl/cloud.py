@@ -504,14 +504,40 @@ def runProjectionSave(
 # ---------------------------------------------------------------------------
 
 
+def _hasCrlfStructuralLines(data: bytes) -> bool:
+    """True if any structural line of a .sgfl file ends in \\r (CRLF-converted).
+
+    Heredoc body lines are always tab-prefixed and may legitimately end in a
+    raw \\r (string values containing CRLF), so only unindented lines count."""
+    for line in data.split(b"\n"):
+        if line.endswith(b"\r") and not line.startswith(b"\t"):
+            return True
+    return False
+
+
 def collectEntryFiles(assetTable: dict) -> list[tuple[str, bytes]]:
     files = []
+    crlfFiles = []
     for name, spec in assetTable.items():
         for suffix in (".sgfl", ".sgfl.rbxm"):
             path = getFileURI(f"{spec['folder']}/{name}{suffix}")
             if os.path.isfile(path):
                 with open(path, "rb") as f:
-                    files.append((f"{spec['folder']}/{name}{suffix}", f.read()))
+                    data = f.read()
+                if suffix == ".sgfl" and _hasCrlfStructuralLines(data):
+                    crlfFiles.append(f"{spec['folder']}/{name}{suffix}")
+                files.append((f"{spec['folder']}/{name}{suffix}", data))
+    if crlfFiles:
+        raise SGFLError(
+            "Entry files have CRLF line endings — the apply task parses them byte-exact "
+            "and would clear subtrees without rebuilding them.",
+            details="Affected: " + ", ".join(sorted(crlfFiles)),
+            suggestions=[
+                "A git checkout with core.autocrlf=true likely converted them (branch switch/merge).",
+                "Add a .gitattributes with '*.sgfl text eol=lf' (plus '*.rbxm binary'), then re-checkout:",
+                "  git ls-files -z -- '*.sgfl' | xargs -0 rm -- && git checkout -- .",
+            ],
+        )
     return files
 
 
@@ -583,6 +609,17 @@ def buildFinalPlace(
     Only Saved versions are created on `basePlaceId`; publishing the returned
     bytes is the caller's decision.
     """
+    # collect (and line-ending-validate) entry files before any cloud call
+    entryFiles = collectEntryFiles(assetTable)
+    if not entryFiles:
+        raise SGFLError(
+            "No .sgfl entry files found to publish.",
+            suggestions=[
+                "Run sgfl save to project the current place into entry files.",
+                "If this project still has legacy .rbxm assets, run sgfl migrate first.",
+            ],
+        )
+
     announceStep("Uploading script build as a Saved base version.")
     with open(placeFilePath, "rb") as f:
         baseBytes = f.read()
@@ -593,16 +630,6 @@ def buildFinalPlace(
         data=baseBytes,
         versionType="Saved",
     )
-
-    entryFiles = collectEntryFiles(assetTable)
-    if not entryFiles:
-        raise SGFLError(
-            "No .sgfl entry files found to publish.",
-            suggestions=[
-                "Run sgfl save to project the current place into entry files.",
-                "If this project still has legacy .rbxm assets, run sgfl migrate first.",
-            ],
-        )
 
     config = buildProjectionConfig(assetTable)
     postapplySource = None

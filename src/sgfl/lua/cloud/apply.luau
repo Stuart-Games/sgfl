@@ -152,13 +152,23 @@ type Block = {
 	styles: { [string]: string },
 }
 
-local function parseEntryText(text: string): { Block }
+local function parseEntryText(text: string, entryLabel: string): { Block }
 	local blocks: { Block } = {}
 	local current: Block? = nil
 	local lines = text:split("\n")
 	local i = 1
 	while i <= #lines do
 		local line = lines[i]
+		-- structural lines never end in a raw \r (heredoc bodies, which may,
+		-- are consumed below and never reach this check): CRLF conversion
+		-- by a git checkout must fail loudly, not clear-and-skip subtrees
+		if line:sub(-1) == "\r" then
+			error(
+				entryLabel
+					.. ": entry file has CRLF line endings (git core.autocrlf likely converted it) — "
+					.. "renormalize to LF and add a .gitattributes rule: *.sgfl text eol=lf"
+			)
+		end
 		if line == "" then
 			i += 1
 			continue
@@ -685,9 +695,11 @@ for _, entry in CONFIG.entries do
 	local isService = not entry.robloxPath:find("%.")
 	local rootAbsolute = pathOfSegments(root)
 
-	clearEntryRoot(root, rootAbsolute, isService)
+	-- parse before clearing: a malformed entry file must abort the task
+	-- before any existing content is destroyed
+	local blocks = parseEntryText(text, entry.name)
 
-	local blocks = parseEntryText(text)
+	clearEntryRoot(root, rootAbsolute, isService)
 
 	-- root block first (path ".")
 	local instanceByPath: { [string]: Instance } = { ["."] = root }

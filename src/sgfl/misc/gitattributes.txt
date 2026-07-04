@@ -1,0 +1,5 @@
+# sgfl entry files are LF-only: the cloud apply task parses them byte-exact,
+# and heredoc blocks may legitimately contain \r, so autocrlf must not touch them.
+*.sgfl text eol=lf
+*.rbxm binary
+*.rbxmx binary
