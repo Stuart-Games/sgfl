@@ -131,7 +131,7 @@ def _loadAssetTable() -> dict:
         if os.path.exists(ASSET_CONFIG_FILE_PATH)
         else getAbsoluteFileURI("json/default.assets.json")
     )
-    return getTableFromJsonFile(configPath)
+    return cloud.normalizeAssetConfig(getTableFromJsonFile(configPath))
 
 
 def _legacyEntryFiles(assetTable: dict) -> list[str]:

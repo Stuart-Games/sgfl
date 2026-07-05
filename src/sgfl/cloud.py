@@ -47,6 +47,9 @@ LEGACY_EXECUTION_KEY_PATH = os.path.join(os.path.expanduser("~"), ".sgfl", "exec
 # otherwise (per-entry "format": "text" | "blob" key)
 BLOB_DEFAULT_NAMES = {"Workspace", "ReplicatedAssets", "ServerAssets", "ShipModules"}
 
+SUPPORTED_ASSET_VERSION = 2
+KNOWN_ASSET_ENTRY_KEYS = {"folder", "robloxPath", "format", "mode", "include", "exclude"}
+
 
 def _requestDiagnostics(method: str, url: str, keyName: str, key: str, response=None, error=None) -> list[str]:
     lines = [
@@ -330,8 +333,128 @@ def rojoMountedPaths(projectJson: dict) -> list[str]:
     return paths
 
 
+def normalizeAssetConfig(assetTable: dict) -> dict:
+    """Validate + normalize a raw assets.json table.
+
+    Single source of truth for assets.json interpretation: every consumer
+    (legacy check, start/save/migrate/publish, buildProjectionConfig) calls
+    this exactly once via operations._loadAssetTable and never sees raw
+    "$"-prefixed keys or unresolved defaults.
+
+    Adds mode/include/exclude/format/pathSegments to every entry (filling in
+    defaults), and enforces:
+    - $version must be present (and >= 2) if any entry uses mode, include,
+      exclude, or a robloxPath deeper than 2 segments. A $version newer than
+      this sgfl understands fails loudly with a "run sgfl update" hint.
+    - children-mode folders are exclusive (not shared with any other entry).
+    - no two entries' robloxPath overlap (equal, or one a prefix of the
+      other) at any depth.
+    """
+    assetTable = dict(assetTable)
+    version = assetTable.pop("$version", None)
+    if version is not None:
+        if not isinstance(version, int) or isinstance(version, bool):
+            raise SGFLError(
+                "assets.json $version must be an integer.",
+                details=f"Got: {version!r}",
+            )
+        if version > SUPPORTED_ASSET_VERSION:
+            raise SGFLError(
+                f"assets.json declares $version {version}, which this sgfl does not understand.",
+                details=f"This sgfl understands up to $version {SUPPORTED_ASSET_VERSION}.",
+                suggestions=["Run sgfl update to upgrade to a version that supports this config."],
+            )
+        if version < 1:
+            raise SGFLError("assets.json $version must be >= 1.", details=f"Got: {version}")
+
+    normalized: dict[str, dict] = {}
+    for name, spec in assetTable.items():
+        if not isinstance(spec, dict):
+            raise SGFLError(f'assets.json entry "{name}" must be an object.')
+        unknown = set(spec.keys()) - KNOWN_ASSET_ENTRY_KEYS
+        if unknown:
+            raise SGFLError(
+                f'assets.json entry "{name}" has unknown key(s): {", ".join(sorted(unknown))}.',
+                suggestions=[f'Known keys: {", ".join(sorted(KNOWN_ASSET_ENTRY_KEYS))}.'],
+            )
+
+        folder = spec.get("folder")
+        if not isinstance(folder, str) or not folder.strip():
+            raise SGFLError(f'assets.json entry "{name}" is missing a non-empty "folder".')
+
+        robloxPath = spec.get("robloxPath")
+        if not isinstance(robloxPath, str) or not robloxPath.strip():
+            raise SGFLError(f'assets.json entry "{name}" is missing a non-empty "robloxPath".')
+        pathSegments = robloxPath.split(".")
+        if any(not segment for segment in pathSegments):
+            raise SGFLError(f'assets.json entry "{name}": robloxPath "{robloxPath}" has an empty segment.')
+
+        entryFormat = spec.get("format")
+        if entryFormat is not None and entryFormat not in ("text", "blob"):
+            raise SGFLError(f'assets.json entry "{name}": format must be "text" or "blob", got {entryFormat!r}.')
+        if entryFormat is None:
+            entryFormat = "blob" if name in BLOB_DEFAULT_NAMES else "text"
+
+        mode = spec.get("mode", "file")
+        if mode not in ("file", "children"):
+            raise SGFLError(f'assets.json entry "{name}": mode must be "file" or "children", got {mode!r}.')
+
+        include = spec.get("include", [])
+        exclude = spec.get("exclude", [])
+        for filterName, filterValue in (("include", include), ("exclude", exclude)):
+            if not isinstance(filterValue, list) or not all(isinstance(p, str) for p in filterValue):
+                raise SGFLError(f'assets.json entry "{name}": {filterName} must be a list of strings.')
+
+        usesV2Features = mode != "file" or bool(include) or bool(exclude) or len(pathSegments) > 2
+        if usesV2Features and (version is None or version < 2):
+            raise SGFLError(
+                f'assets.json entry "{name}" uses a v2 feature (mode, include/exclude, or a robloxPath '
+                f"deeper than 2 segments) but $version 2 is not declared.",
+                suggestions=['Add "$version": 2 to the top of assets.json.'],
+            )
+
+        normalized[name] = {
+            "folder": folder,
+            "robloxPath": robloxPath,
+            "pathSegments": pathSegments,
+            "format": entryFormat,
+            "mode": mode,
+            "include": include,
+            "exclude": exclude,
+        }
+
+    folderOwners: dict[str, list[str]] = {}
+    for name, spec in normalized.items():
+        folderOwners.setdefault(spec["folder"], []).append(name)
+    for name, spec in normalized.items():
+        if spec["mode"] == "children" and len(folderOwners[spec["folder"]]) > 1:
+            others = [n for n in folderOwners[spec["folder"]] if n != name]
+            raise SGFLError(
+                f'assets.json entry "{name}" is mode="children" but folder "{spec["folder"]}" is also '
+                f'used by {", ".join(others)} — children-mode folders must be dedicated.',
+            )
+
+    names = sorted(normalized.keys())
+    for i, nameA in enumerate(names):
+        segmentsA = normalized[nameA]["pathSegments"]
+        for nameB in names[i + 1 :]:
+            segmentsB = normalized[nameB]["pathSegments"]
+            shorter, longer = (
+                (segmentsA, segmentsB) if len(segmentsA) <= len(segmentsB) else (segmentsB, segmentsA)
+            )
+            if longer[: len(shorter)] == shorter:
+                raise SGFLError(
+                    f'assets.json entries "{nameA}" and "{nameB}" have overlapping robloxPath '
+                    f'("{normalized[nameA]["robloxPath"]}" / "{normalized[nameB]["robloxPath"]}").',
+                    suggestions=["Each entry must own a disjoint subtree."],
+                )
+
+    return normalized
+
+
 def buildProjectionConfig(assetTable: dict) -> dict:
-    """Build the config JSON injected into both Luau scripts."""
+    """Build the config JSON injected into both Luau scripts. `assetTable`
+    must already be normalized (see normalizeAssetConfig)."""
     rojoPaths: list[str] = []
     projectPath = getFileURI("default.project.json")
     if os.path.exists(projectPath):
@@ -340,13 +463,15 @@ def buildProjectionConfig(assetTable: dict) -> dict:
 
     entries = []
     for name, spec in assetTable.items():
-        entryFormat = spec.get("format") or ("blob" if name in BLOB_DEFAULT_NAMES else "text")
         entries.append(
             {
                 "name": name,
                 "folder": spec["folder"],
                 "robloxPath": spec["robloxPath"],
-                "format": entryFormat,
+                "format": spec["format"],
+                "mode": spec["mode"],
+                "include": spec["include"],
+                "exclude": spec["exclude"],
             }
         )
 
@@ -496,6 +621,25 @@ def runProjectionSave(
         with open(target, "wb") as f:
             f.write(data)
 
+    # children-mode folders are dedicated and fully sgfl-managed: any .sgfl /
+    # .sgfl.rbxm file in the folder that wasn't just written this save is a
+    # stale leftover (e.g. from a deleted or renamed child) and is removed.
+    for entry in config["entries"]:
+        if entry["mode"] != "children":
+            continue
+        folderPath = getFileURI(entry["folder"])
+        if not os.path.isdir(folderPath):
+            continue
+        written = {name for name in files if name.startswith(entry["folder"] + "/")}
+        for fileName in os.listdir(folderPath):
+            if not (fileName.endswith(".sgfl") or fileName.endswith(".sgfl.rbxm")):
+                continue
+            relPath = f"{entry['folder']}/{fileName}"
+            if relPath in written:
+                continue
+            os.remove(getFileURI(relPath))
+            print(f"{color.YELLOW}{color.BOLD}WARN{color.END} deleted stale unmanaged file: {relPath}")
+
     return placeVersion
 
 
@@ -518,15 +662,38 @@ def _hasCrlfStructuralLines(data: bytes) -> bool:
 def collectEntryFiles(assetTable: dict) -> list[tuple[str, bytes]]:
     files = []
     crlfFiles = []
+
+    def addFile(relPath: str, absPath: str) -> None:
+        with open(absPath, "rb") as f:
+            data = f.read()
+        if relPath.endswith(".sgfl") and _hasCrlfStructuralLines(data):
+            crlfFiles.append(relPath)
+        files.append((relPath, data))
+
     for name, spec in assetTable.items():
-        for suffix in (".sgfl", ".sgfl.rbxm"):
-            path = getFileURI(f"{spec['folder']}/{name}{suffix}")
-            if os.path.isfile(path):
-                with open(path, "rb") as f:
-                    data = f.read()
-                if suffix == ".sgfl" and _hasCrlfStructuralLines(data):
-                    crlfFiles.append(f"{spec['folder']}/{name}{suffix}")
-                files.append((f"{spec['folder']}/{name}{suffix}", data))
+        rootPath = getFileURI(f"{spec['folder']}/{name}.sgfl")
+        if os.path.isfile(rootPath):
+            addFile(f"{spec['folder']}/{name}.sgfl", rootPath)
+
+        if spec["mode"] == "children":
+            folderPath = getFileURI(spec["folder"])
+            if not os.path.isdir(folderPath):
+                continue
+            rootFileName = f"{name}.sgfl"
+            for fileName in sorted(os.listdir(folderPath)):
+                if fileName == rootFileName:
+                    continue
+                if not (fileName.endswith(".sgfl") or fileName.endswith(".sgfl.rbxm")):
+                    continue
+                filePath = os.path.join(folderPath, fileName)
+                if not os.path.isfile(filePath):
+                    continue
+                addFile(f"{spec['folder']}/{fileName}", filePath)
+        else:
+            blobPath = getFileURI(f"{spec['folder']}/{name}.sgfl.rbxm")
+            if os.path.isfile(blobPath):
+                addFile(f"{spec['folder']}/{name}.sgfl.rbxm", blobPath)
+
     if crlfFiles:
         raise SGFLError(
             "Entry files have CRLF line endings — the apply task parses them byte-exact "

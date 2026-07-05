@@ -69,7 +69,16 @@ The deprecated `--env-suffix` / `-e` flag on `start`/`save` still works; prefer 
 
 ## `assets.json` Semantics
 
-Unchanged shape: entry name → `{folder, robloxPath}` with `robloxPath` either service-level (one segment; whole service) or `Service.Folder` (two segments). Plus the optional `"format": "text" | "blob"` key per entry. You still cannot mix both path forms for the same service, multiple entries can share a `folder`, and deeper paths are unsupported. Entry files are written/read strictly by entry name — arbitrary other files in asset folders (art sources, READMEs) are never touched. Missing entry file on publish = that entry keeps the rojo-built base content; missing declared path on save = loud warning.
+Entry name → `{folder, robloxPath}` plus the optional `"format": "text" | "blob"` key. `robloxPath` is service-level (one segment) or a dot-joined path of arbitrary depth (`Service.Folder`, `Service.Folder.SubFolder`, …) resolved segment-by-segment in both Luau scripts. No two entries' `robloxPath` may overlap (equal, or one a prefix of the other) at any depth; multiple entries may still share a `folder`. Entry files are written/read strictly by entry name (or, in `mode: "children"`, by child name within the entry's dedicated folder) — arbitrary other files in asset folders (art sources, READMEs) are never touched. Missing entry file on publish = that entry keeps the rojo-built base content; missing declared path on save = loud warning.
+
+**`normalizeAssetConfig`** in [cloud.py](src/sgfl/cloud.py) is the single source of truth for interpreting `assets.json` — called once by `operations._loadAssetTable`, so every consumer (legacy check, start/save/migrate/publish, `buildProjectionConfig`) sees fully-normalized entries (`format`/`mode`/`include`/`exclude`/`pathSegments` always populated) and never sees `$`-prefixed keys. It enforces:
+
+- **`$version`**: required (and must be `2`) iff any entry uses `mode`, `include`, `exclude`, or a `robloxPath` deeper than 2 segments. A `$version` newer than `SUPPORTED_ASSET_VERSION` fails with a "run `sgfl update`" error; an unrecognized `$version` key on pre-2.1 sgfl fails closed with a `TypeError` before any cloud call or file write (verified, not a hazard to guard against further).
+- **`mode: "file"`** (default, unchanged) vs **`mode: "children"`** — the entry's `folder` becomes exclusive (checked across all entries) and produces `{Entry}.sgfl` (container root's own props/attrs/tags only) plus one file per managed direct child: `{ChildName}.sgfl` (text tier) or `{ChildName}.sgfl.rbxm` (blob tier, whole child as one engine blob). `sgfl save` deletes stale `.sgfl`/`.sgfl.rbxm` files in the folder that no longer correspond to a managed child.
+- **`include`/`exclude`**: lists of name globs (`"Temp*"`) or `"$ClassName"` (`IsA` match), applied only to direct children of the entry root (both modes), include-then-exclude precedence. Filtered-out children are unmanaged: `sgfl save` never writes them, `sgfl start`/`publish` never clears them.
+- Child names in `mode: "children"` must be filesystem-safe and case-insensitively unique, or `sgfl save` fails loud (Studio rename required) rather than colliding or dropping data.
+
+The Luau scripts duplicate a small `isManaged`/glob-matching helper (no `require` between the two standalone task scripts) — keep both copies identical, same as the value encoder/decoder tables.
 
 ## Error Handling Pattern
 
@@ -80,7 +89,7 @@ Unchanged: everything raises `SGFLError(message, details, suggestions, ...)`, re
 - **camelCase for Python identifiers** — match the existing style; do not Pythonify to snake_case.
 - **`announceStep("...")`** before each user-visible phase; green `SUCCESS` line on completion; loud yellow `WARN` lines, never silent drops.
 - No tests, no lint config, no CI beyond `.github/agents/`. Distribution via `pipx install git+https://github.com/devvf/sgfl.git`.
-- Bump `version` in [pyproject.toml](pyproject.toml) for user-visible changes (v2.0.0 = the cloud-pipeline cutover).
+- Bump `version` in [pyproject.toml](pyproject.toml) for user-visible changes (v2.0.0 = the cloud-pipeline cutover; v2.1.0 = extensible `assets.json` — `mode`/`include`/`exclude`/`$version`).
 - StyLua targets latest release.
 
 ## Cross-Platform Notes
@@ -91,7 +100,7 @@ Unchanged: everything raises `SGFLError(message, details, suggestions, ...)`, re
 
 ## When Modifying This Project
 
-- Touching the entry file format? Update **both** [lua/cloud/projection.luau](src/sgfl/lua/cloud/projection.luau) (encode) and [lua/cloud/apply.luau](src/sgfl/lua/cloud/apply.luau) (decode) — they must stay symmetric — and re-verify the two gates on a real place: save twice (no-op stability) and publish→save (round-trip identity).
+- Touching the entry file format, the `isManaged`/glob-matching filter helper, or `resolveEntryRoot`'s path-walk? Update **both** [lua/cloud/projection.luau](src/sgfl/lua/cloud/projection.luau) (encode) and [lua/cloud/apply.luau](src/sgfl/lua/cloud/apply.luau) (decode) — they must stay symmetric — and re-verify the two gates on a real place: save twice (no-op stability) and publish→save (round-trip identity).
 - Adding a sidecar property? Usually unnecessary since v2.1.0: the full-capability reflection sweep sees every serialized prop, so new hidden service-root props flow into the dynamic sidecar automatically (typeId discovered from the binary; undecodable types WARN). Add a static `(class, prop): typeId` to `ALLOWLIST` in [sidecar.py](src/sgfl/sidecar.py) only to pin an expected typeId (and `ANCHORS` if script-readable). To *exclude* a junk Studio-state prop instead, add it to `BENIGN_HIDDEN` in projection.luau.
 - Adding a new env var? Add it to `API_ENV_KEYS`/`ID_ENV_KEYS` in [util.py](src/sgfl/util.py), to `envDiagnosticKeys` for the relevant subcommands in [sgfl.py](src/sgfl/sgfl.py), and — if per-developer — to `CREDENTIAL_KEYS` plus the `auth login` prompts/flags.
 - Adding a new subcommand? Wire it in four places: [sgfl.py](src/sgfl/sgfl.py) (Typer function using `_runTask`), [cli.py](src/sgfl/cli.py) (`app.command()`), [operations.py](src/sgfl/operations.py) (implementation), `_toolDiagnosticsForTask` in [util.py](src/sgfl/util.py).

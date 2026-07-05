@@ -15,7 +15,8 @@
 	The driver fills the CONFIG placeholder below (which must appear exactly
 	once in this file — never write the token in comments) with JSON:
 	  {
-	    "entries": [ {"name","folder","robloxPath","format"} ],   -- format: "text"|"blob"
+	    "entries": [ {"name","folder","robloxPath","format","mode","include","exclude"} ],
+	                                                               -- format: "text"|"blob"; mode: "file"|"children"
 	    "rojoPaths": [ "StarterPlayer/StarterPlayerScripts/Client", ... ],
 	    "sidecarProps": [ "Workspace.StreamingMinRadius", ... ],  -- hidden props the binary sidecar covers
 	    "anchorProps": [ "Gravity", ... ]                          -- readable Workspace props returned for the canary
@@ -31,6 +32,14 @@
 	subtrees inside text entries):
 	  [<path>] <ClassName> !blob
 	  !data = <base64>
+
+	mode = "children": the entry's direct children (filtered by include/exclude,
+	same semantics as "file" mode but applied once at the entry root) are each
+	projected as their own file under the entry's folder — {ChildName}.sgfl for
+	text tier, {ChildName}.sgfl.rbxm (whole child as one engine blob) for blob
+	tier — plus {Entry}.sgfl holding only the container root's own block.
+	include/exclude entries are name globs ("Temp*") or "$ClassName" (IsA match);
+	include-then-exclude precedence; unmanaged children are untouched by save.
 ]]
 
 local HttpService = game:GetService("HttpService")
@@ -664,6 +673,70 @@ for _, p in (CONFIG.rojoPaths or {}) :: { string } do
 	rojoExcluded[p] = true
 end
 
+------------------------------------------------------------------------------
+-- Entry filters: include/exclude name globs ("Temp*") or "$ClassName" (IsA)
+------------------------------------------------------------------------------
+
+local MAGIC_CHARS = "().%+-*?[]^$"
+local function globToPattern(glob: string): string
+	local out = { "^" }
+	for i = 1, #glob do
+		local c = glob:sub(i, i)
+		if c == "*" then
+			table.insert(out, ".-")
+		elseif MAGIC_CHARS:find(c, 1, true) then
+			table.insert(out, "%" .. c)
+		else
+			table.insert(out, c)
+		end
+	end
+	table.insert(out, "$")
+	return table.concat(out)
+end
+
+local function matchesFilterPattern(inst: Instance, pattern: string): boolean
+	if pattern:sub(1, 1) == "$" then
+		return inst:IsA(pattern:sub(2))
+	end
+	return inst.Name:match(globToPattern(pattern)) ~= nil
+end
+
+-- include-then-exclude precedence; no include list = everything included
+local function isManaged(inst: Instance, entry): boolean
+	local include = entry.include :: { string }
+	local exclude = entry.exclude :: { string }
+	if include and #include > 0 then
+		local included = false
+		for _, pattern in include do
+			if matchesFilterPattern(inst, pattern) then
+				included = true
+				break
+			end
+		end
+		if not included then
+			return false
+		end
+	end
+	if exclude then
+		for _, pattern in exclude do
+			if matchesFilterPattern(inst, pattern) then
+				return false
+			end
+		end
+	end
+	return true
+end
+
+local function isValidChildFilename(name: string): boolean
+	if name == "" then
+		return false
+	end
+	if name:match("^[%s%.]") or name:match("[%s%.]$") then
+		return false
+	end
+	return name:match("^[%w _%.%-]+$") ~= nil
+end
+
 local function resolveEntryRoot(robloxPath: string): (Instance?, string?)
 	local segments = robloxPath:split(".")
 	local service = game:FindFirstChild(segments[1])
@@ -676,14 +749,15 @@ local function resolveEntryRoot(robloxPath: string): (Instance?, string?)
 	if not service then
 		return nil, "service " .. segments[1] .. " not found"
 	end
-	if #segments == 1 then
-		return service, nil
+	local cursor = service
+	for i = 2, #segments do
+		local nextChild = cursor:FindFirstChild(segments[i])
+		if not nextChild then
+			return nil, robloxPath .. ' not found (missing "' .. segments[i] .. '")'
+		end
+		cursor = nextChild
 	end
-	local folder = service:FindFirstChild(segments[2])
-	if not folder then
-		return nil, robloxPath .. " not found"
-	end
-	return folder, nil
+	return cursor, nil
 end
 
 -- children in canonical projection order: non-creatable singletons first
@@ -711,7 +785,7 @@ local function canonicalChildren(inst: Instance): { Instance }
 	return locked
 end
 
-local function projectEntryText(root: Instance, rootAbsolute: { string }): string
+local function projectEntryText(root: Instance, rootAbsolute: { string }, entry, filterAtRoot: boolean): string
 	local out = {}
 	local entryRoot = root
 
@@ -735,7 +809,7 @@ local function projectEntryText(root: Instance, rootAbsolute: { string }): strin
 
 	projectInstance(root, ".", out, true)
 
-	local function visit(inst: Instance, pathText: string, absolute: { string })
+	local function visit(inst: Instance, pathText: string, absolute: { string }, applyFilter: boolean)
 		for _, child in canonicalChildren(inst) do
 			-- non-Archivable = engine-injected session-only content (default
 			-- PlayerModule etc.); no serializer persists it and neither do we
@@ -744,6 +818,10 @@ local function projectEntryText(root: Instance, rootAbsolute: { string }): strin
 			end
 			-- Camera is stripped (regenerated by Studio), matching legacy importAssets
 			if child:IsA("Camera") and inst == workspace then
+				continue
+			end
+			-- filters apply only to direct children of the entry root
+			if applyFilter and not isManaged(child, entry) then
 				continue
 			end
 			local segment = occurrenceSegment(child)
@@ -756,16 +834,16 @@ local function projectEntryText(root: Instance, rootAbsolute: { string }): strin
 			projectInstance(child, childPath, out)
 			-- islands embed their descendants; skip recursion for them
 			if #islandProps(child) == 0 then
-				visit(child, childPath, childAbsolute)
+				visit(child, childPath, childAbsolute, false)
 			end
 		end
 	end
-	visit(root, ".", rootAbsolute)
+	visit(root, ".", rootAbsolute, filterAtRoot)
 
 	return table.concat(out, "\n")
 end
 
-local function projectEntryBlob(root: Instance): (string, buffer?)
+local function projectEntryBlob(root: Instance, entry): (string, buffer?)
 	-- text companion: the root's own properties only
 	local out = {}
 	refEncoder = function(target: Instance): string
@@ -783,6 +861,9 @@ local function projectEntryBlob(root: Instance): (string, buffer?)
 			continue
 		end
 		if child:IsA("Camera") and root == workspace then
+			continue
+		end
+		if not isManaged(child, entry) then
 			continue
 		end
 		table.insert(children, child)
@@ -819,6 +900,83 @@ local function projectEntryBlob(root: Instance): (string, buffer?)
 	return table.concat(out, "\n"), blob :: buffer
 end
 
+-- mode = "children": container root's own block + one file per managed
+-- direct child (text tier: full subtree via projectEntryText with the child
+-- itself as the ref-relative root; blob tier: whole child as one engine blob)
+local function projectEntryChildren(
+	entry,
+	root: Instance,
+	rootAbsolute: { string }
+): { { name: string, data: string } }
+	local out: { { name: string, data: string } } = {}
+
+	refEncoder = function(target: Instance): string
+		local segments = absoluteSegments(target)
+		if not segments then
+			error("ref target " .. target:GetFullName() .. " is not under the DataModel")
+		end
+		return "Ref(game/" .. table.concat(segments, "/") .. ")"
+	end
+	local rootOut = {}
+	projectInstance(root, ".", rootOut, true)
+	table.insert(out, { name = entry.folder .. "/" .. entry.name .. ".sgfl", data = table.concat(rootOut, "\n") })
+
+	local seenNames: { [string]: boolean } = {}
+	for _, child in canonicalChildren(root) do
+		if not child.Archivable then
+			continue
+		end
+		if child:IsA("Camera") and root == workspace then
+			continue
+		end
+		local childAbsolute = table.clone(rootAbsolute)
+		table.insert(childAbsolute, occurrenceSegment(child))
+		if rojoExcluded[table.concat(childAbsolute, "/")] then
+			continue
+		end
+		if not isManaged(child, entry) then
+			continue
+		end
+
+		if not isValidChildFilename(child.Name) then
+			error(
+				entry.name
+					.. ': child name "'
+					.. child.Name
+					.. '" is not filesystem-safe (letters, digits, spaces, "_", ".", "-" only; no leading/trailing dot or space) — rename it in Studio'
+			)
+		end
+		local lowerName = child.Name:lower()
+		if seenNames[lowerName] then
+			error(
+				entry.name
+					.. ': duplicate child name "'
+					.. child.Name
+					.. '" (case-insensitive) — rename one in Studio'
+			)
+		end
+		seenNames[lowerName] = true
+
+		if entry.format == "blob" then
+			local okBlob, blob = pcall(function()
+				return SerializationService:SerializeInstancesAsync({ child })
+			end)
+			if not okBlob then
+				error(entry.name .. ': child "' .. child.Name .. '" cannot be blob-serialized: ' .. tostring(blob))
+			end
+			table.insert(
+				out,
+				{ name = entry.folder .. "/" .. child.Name .. ".sgfl.rbxm", data = buffer.tostring(blob :: buffer) }
+			)
+		else
+			local childText = projectEntryText(child, childAbsolute, entry, false)
+			table.insert(out, { name = entry.folder .. "/" .. child.Name .. ".sgfl", data = childText })
+		end
+	end
+
+	return out
+end
+
 ------------------------------------------------------------------------------
 -- Main
 ------------------------------------------------------------------------------
@@ -843,8 +1001,17 @@ for _, entry in CONFIG.entries do
 		end
 	end
 
-	if entry.format == "blob" then
-		local okBlob, textOrErr, blob = pcall(projectEntryBlob, root)
+	if entry.mode == "children" then
+		local okChildren, filesOrErr = pcall(projectEntryChildren, entry, root, rootAbsolute)
+		if not okChildren then
+			addWarning("entry " .. entry.name .. " (children): " .. tostring(filesOrErr))
+			continue
+		end
+		for _, f in filesOrErr :: { { name: string, data: string } } do
+			table.insert(files, f)
+		end
+	elseif entry.format == "blob" then
+		local okBlob, textOrErr, blob = pcall(projectEntryBlob, root, entry)
 		if not okBlob then
 			addWarning("entry " .. entry.name .. " (blob): " .. tostring(textOrErr))
 			continue
@@ -857,7 +1024,7 @@ for _, entry in CONFIG.entries do
 			)
 		end
 	else
-		local okText, textOrErr = pcall(projectEntryText, root, rootAbsolute)
+		local okText, textOrErr = pcall(projectEntryText, root, rootAbsolute, entry, true)
 		if not okText then
 			addWarning("entry " .. entry.name .. " (text): " .. tostring(textOrErr))
 			continue
