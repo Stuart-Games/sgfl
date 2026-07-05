@@ -19,6 +19,13 @@
 
 	[!sidecar ...] blocks are ignored here — the driver patches those values
 	into the saved binary afterwards.
+
+	mode = "children": entry files live under the entry's dedicated folder as
+	{Entry}.sgfl (container root block only) plus one {ChildName}.sgfl /
+	{ChildName}.sgfl.rbxm per managed child (discovered by folder prefix in
+	the input container's manifest, since child names aren't in CONFIG).
+	Filters (include/exclude) additionally gate what clearEntryRoot destroys,
+	on both "file" and "children" mode entries.
 ]]
 
 local HttpService = game:GetService("HttpService")
@@ -457,6 +464,61 @@ for _, p in (CONFIG.rojoPaths or {}) :: { string } do
 	rojoExcluded[p] = true
 end
 
+------------------------------------------------------------------------------
+-- Entry filters: include/exclude name globs ("Temp*") or "$ClassName" (IsA).
+-- Kept identical to projection.luau's copy — the two must stay symmetric.
+------------------------------------------------------------------------------
+
+local MAGIC_CHARS = "().%+-*?[]^$"
+local function globToPattern(glob: string): string
+	local out = { "^" }
+	for i = 1, #glob do
+		local c = glob:sub(i, i)
+		if c == "*" then
+			table.insert(out, ".-")
+		elseif MAGIC_CHARS:find(c, 1, true) then
+			table.insert(out, "%" .. c)
+		else
+			table.insert(out, c)
+		end
+	end
+	table.insert(out, "$")
+	return table.concat(out)
+end
+
+local function matchesFilterPattern(inst: Instance, pattern: string): boolean
+	if pattern:sub(1, 1) == "$" then
+		return inst:IsA(pattern:sub(2))
+	end
+	return inst.Name:match(globToPattern(pattern)) ~= nil
+end
+
+-- include-then-exclude precedence; no include list = everything included
+local function isManaged(inst: Instance, entry): boolean
+	local include = entry.include :: { string }
+	local exclude = entry.exclude :: { string }
+	if include and #include > 0 then
+		local included = false
+		for _, pattern in include do
+			if matchesFilterPattern(inst, pattern) then
+				included = true
+				break
+			end
+		end
+		if not included then
+			return false
+		end
+	end
+	if exclude then
+		for _, pattern in exclude do
+			if matchesFilterPattern(inst, pattern) then
+				return false
+			end
+		end
+	end
+	return true
+end
+
 local function findOccurrence(parent: Instance, name: string, occurrence: number): Instance?
 	local seen = 0
 	for _, child in parent:GetChildren() do
@@ -624,19 +686,20 @@ local function resolveEntryRoot(robloxPath: string): (Instance?, string?)
 	if not service then
 		return nil, "service " .. segments[1] .. " not found"
 	end
-	if #segments == 1 then
-		return service, nil
+	local cursor = service
+	for i = 2, #segments do
+		local nextChild = cursor:FindFirstChild(segments[i])
+		if not nextChild then
+			nextChild = Instance.new("Folder")
+			nextChild.Name = segments[i]
+			nextChild.Parent = cursor
+		end
+		cursor = nextChild
 	end
-	local folder = service:FindFirstChild(segments[2])
-	if not folder then
-		folder = Instance.new("Folder")
-		folder.Name = segments[2]
-		folder.Parent = service
-	end
-	return folder, nil
+	return cursor, nil
 end
 
-local function clearEntryRoot(root: Instance, rootAbsolute: { string }, isService: boolean)
+local function clearEntryRoot(root: Instance, rootAbsolute: { string }, isService: boolean, entry)
 	for _, child in root:GetChildren() do
 		if not child.Archivable then
 			continue
@@ -649,6 +712,11 @@ local function clearEntryRoot(root: Instance, rootAbsolute: { string }, isServic
 			if rojoExcluded[childPath] then
 				continue
 			end
+		end
+		if not isManaged(child, entry) then
+			continue
+		end
+		if isService then
 			-- non-creatable singletons (StarterPlayerScripts etc.) are reused, not destroyed
 			local okNew, probe = pcall(function()
 				return Instance.new(child.ClassName)
@@ -672,43 +740,19 @@ local function pathOfSegments(inst: Instance): { string }
 	return segments
 end
 
-------------------------------------------------------------------------------
--- Pass 1: build every entry
-------------------------------------------------------------------------------
-
-local appliedEntries = 0
-local entryRoots: { [string]: Instance } = {}
-
-for _, entry in CONFIG.entries do
-	local textName = entry.folder .. "/" .. entry.name .. ".sgfl"
-	local text = inputFiles[textName]
-	if not text then
-		-- missing entry file = keep base content (matches legacy build.luau skip)
-		continue
-	end
-	local root, resolveErr = resolveEntryRoot(entry.robloxPath)
-	if not root then
-		addWarning("entry " .. entry.name .. ": " .. resolveErr :: string)
-		continue
-	end
-	entryRoots[entry.name] = root
-	local isService = not entry.robloxPath:find("%.")
-	local rootAbsolute = pathOfSegments(root)
-
-	-- parse before clearing: a malformed entry file must abort the task
-	-- before any existing content is destroyed
-	local blocks = parseEntryText(text, entry.name)
-
-	clearEntryRoot(root, rootAbsolute, isService)
-
-	-- root block first (path ".")
+-- Build the instances described by `blocks` beneath `root` (root block first,
+-- path "."), resolving parents by path as they're created. `entryRoot` is the
+-- base "./..." refs in this block set resolve against (== root, except when
+-- applying a children-mode child's own file, where the child is its own
+-- ref-relative root). `labelPrefix` is used in warning messages.
+local function applyBlocks(blocks: { Block }, root: Instance, entryRoot: Instance, labelPrefix: string)
 	local instanceByPath: { [string]: Instance } = { ["."] = root }
 	for _, block in blocks do
 		if block.isSidecar then
 			continue
 		end
 		if block.pathText == "." then
-			applyProps(root, block, root, entry.name .. ":.")
+			applyProps(root, block, entryRoot, labelPrefix .. ":.")
 			continue
 		end
 		local segments = splitPath(block.pathText)
@@ -719,7 +763,7 @@ for _, entry in CONFIG.entries do
 		end
 		local parent = instanceByPath[parentPath]
 		if not parent then
-			addWarning(entry.name .. ": parent not found for " .. block.pathText)
+			addWarning(labelPrefix .. ": parent not found for " .. block.pathText)
 			continue
 		end
 		local leaf = segments[#segments]
@@ -727,7 +771,7 @@ for _, entry in CONFIG.entries do
 		if block.isBlob then
 			-- island: deserialize the subtree and parent it
 			if not block.dataB64 then
-				addWarning(entry.name .. ": island " .. block.pathText .. " has no !data")
+				addWarning(labelPrefix .. ": island " .. block.pathText .. " has no !data")
 				continue
 			end
 			local okDeser, listOrErr = pcall(function()
@@ -736,7 +780,7 @@ for _, entry in CONFIG.entries do
 				)
 			end)
 			if not okDeser then
-				addWarning(entry.name .. ": island " .. block.pathText .. " failed: " .. tostring(listOrErr))
+				addWarning(labelPrefix .. ": island " .. block.pathText .. " failed: " .. tostring(listOrErr))
 				continue
 			end
 			for _, inst in listOrErr :: { Instance } do
@@ -763,7 +807,7 @@ for _, entry in CONFIG.entries do
 				return Instance.new(block.className)
 			end)
 			if not okNew then
-				addWarning(entry.name .. ": cannot create " .. block.className .. " at " .. block.pathText)
+				addWarning(labelPrefix .. ": cannot create " .. block.className .. " at " .. block.pathText)
 				continue
 			end
 			inst = created :: Instance
@@ -771,8 +815,118 @@ for _, entry in CONFIG.entries do
 			inst.Parent = parent
 		end
 		instanceByPath[block.pathText] = inst :: Instance
-		applyProps(inst :: Instance, block, root, entry.name .. ":" .. block.pathText)
+		applyProps(inst :: Instance, block, entryRoot, labelPrefix .. ":" .. block.pathText)
 	end
+end
+
+------------------------------------------------------------------------------
+-- Pass 1: build every entry
+------------------------------------------------------------------------------
+
+local appliedEntries = 0
+local entryRoots: { [string]: Instance } = {}
+
+for _, entry in CONFIG.entries do
+	if entry.mode == "children" then
+		-- sgfl save always writes the root file for a children-mode entry, so
+		-- its absence means this entry was never saved — keep base content,
+		-- exactly like the missing-entry-file skip below for "file" mode
+		local rootFileName = entry.folder .. "/" .. entry.name .. ".sgfl"
+		local rootText = inputFiles[rootFileName]
+		if not rootText then
+			continue
+		end
+
+		local root, resolveErr = resolveEntryRoot(entry.robloxPath)
+		if not root then
+			addWarning("entry " .. entry.name .. ": " .. resolveErr :: string)
+			continue
+		end
+		entryRoots[entry.name] = root
+		local isService = not entry.robloxPath:find("%.")
+		local rootAbsolute = pathOfSegments(root)
+
+		-- parse before clearing: a malformed entry file must abort the task
+		-- before any existing content is destroyed
+		local rootBlocks = parseEntryText(rootText, entry.name)
+
+		clearEntryRoot(root, rootAbsolute, isService, entry)
+		applyBlocks(rootBlocks, root, root, entry.name)
+
+		-- child files aren't in CONFIG (names are dynamic) — discover them by
+		-- folder prefix among the files actually shipped in this task's input
+		local prefix = entry.folder .. "/"
+		for fileName, data in inputFiles do
+			if fileName == rootFileName or fileName:sub(1, #prefix) ~= prefix then
+				continue
+			end
+			local rest = fileName:sub(#prefix + 1)
+			if rest:sub(-10) == ".sgfl.rbxm" then
+				local okDeser, listOrErr = pcall(function()
+					return SerializationService:DeserializeInstancesAsync(buffer.fromstring(data))
+				end)
+				if okDeser then
+					reparentBlobChildren(listOrErr :: { Instance }, root)
+				else
+					addWarning(entry.name .. ": child blob " .. fileName .. " deserialize failed: " .. tostring(
+						listOrErr
+					))
+				end
+			elseif rest:sub(-5) == ".sgfl" then
+				local childName = rest:sub(1, #rest - 5)
+				local childBlocks = parseEntryText(data, entry.name .. ":" .. childName)
+				local rootBlock: Block? = nil
+				for _, block in childBlocks do
+					if block.pathText == "." and not block.isSidecar then
+						rootBlock = block
+						break
+					end
+				end
+				if not rootBlock then
+					addWarning(entry.name .. ": child file " .. fileName .. " missing root block")
+					continue
+				end
+				local okNew, child = pcall(function()
+					return Instance.new((rootBlock :: Block).className)
+				end)
+				if not okNew then
+					addWarning(
+						entry.name .. ": cannot create " .. (rootBlock :: Block).className .. " for child " .. childName
+					)
+					continue
+				end
+				local newChild = child :: Instance
+				newChild.Name = childName
+				newChild.Parent = root
+				applyBlocks(childBlocks, newChild, newChild, entry.name .. ":" .. childName)
+			end
+		end
+
+		appliedEntries += 1
+		continue
+	end
+
+	local textName = entry.folder .. "/" .. entry.name .. ".sgfl"
+	local text = inputFiles[textName]
+	if not text then
+		-- missing entry file = keep base content (matches legacy build.luau skip)
+		continue
+	end
+	local root, resolveErr = resolveEntryRoot(entry.robloxPath)
+	if not root then
+		addWarning("entry " .. entry.name .. ": " .. resolveErr :: string)
+		continue
+	end
+	entryRoots[entry.name] = root
+	local isService = not entry.robloxPath:find("%.")
+	local rootAbsolute = pathOfSegments(root)
+
+	-- parse before clearing: a malformed entry file must abort the task
+	-- before any existing content is destroyed
+	local blocks = parseEntryText(text, entry.name)
+
+	clearEntryRoot(root, rootAbsolute, isService, entry)
+	applyBlocks(blocks, root, root, entry.name)
 
 	-- NOTE: reused non-creatable children (TextChatService configs, Terrain,
 	-- StarterPlayerScripts, ...) keep their engine-assigned position — their

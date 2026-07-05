@@ -101,6 +101,22 @@ def lz4Decompress(data, outSize):
     return bytes(out)
 
 
+def zstdDecompress(data, outSize):
+    """Decompress a zstd-framed chunk body. Prefers the stdlib `compression.zstd`
+    (Python 3.14+, no extra dependency); falls back to the `zstandard` package
+    on older interpreters. Raises ImportError if neither is available — callers
+    treat that as a loud, reported problem rather than silently losing data."""
+    try:
+        from compression import zstd  # Python 3.14+
+
+        return zstd.decompress(data)
+    except ImportError:
+        pass
+    import zstandard
+
+    return zstandard.ZstdDecompressor().decompress(data, max_output_size=outSize)
+
+
 def readString(buf, pos):
     n = struct.unpack_from("<I", buf, pos)[0]
     return buf[pos + 4 : pos + 4 + n].decode("utf-8", "replace"), pos + 4 + n
@@ -205,11 +221,12 @@ def extract(data, allowlist=None):
             pos = bodyStart + comp
             if raw[:4] == ZSTD_MAGIC:
                 try:
-                    from compression import zstd  # Python 3.14+
-
-                    body = zstd.decompress(raw)
+                    body = zstdDecompress(raw, uncomp)
                 except ImportError:
-                    problems.append(f"zstd chunk encountered ({chunkName!r}) and no zstd module available")
+                    problems.append(
+                        f"zstd chunk encountered ({chunkName!r}) and no zstd decoder available "
+                        '(pip install "zstandard", or use Python 3.14+)'
+                    )
                     continue
             else:
                 body = lz4Decompress(raw, uncomp)
@@ -286,9 +303,7 @@ def patchFile(data, patches):
                 return data[bodyStart : bodyStart + uncomp]
             raw = data[bodyStart : bodyStart + comp]
             if raw[:4] == ZSTD_MAGIC:
-                from compression import zstd  # Python 3.14+; raises if unavailable
-
-                return zstd.decompress(raw)
+                return zstdDecompress(raw, uncomp)  # raises ImportError if no zstd decoder is available
             return lz4Decompress(raw, uncomp)
 
         replacement = None
