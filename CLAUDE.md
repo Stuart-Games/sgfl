@@ -88,7 +88,7 @@ Unchanged: everything raises `SGFLError(message, details, suggestions, ...)`, re
 
 - **camelCase for Python identifiers** — match the existing style; do not Pythonify to snake_case.
 - **`announceStep("...")`** before each user-visible phase; green `SUCCESS` line on completion; loud yellow `WARN` lines, never silent drops.
-- No tests, no lint config, no CI beyond `.github/agents/`. Distribution via `pipx install git+https://github.com/devvf/sgfl.git`.
+- `pytest` unit tests live in [tests/](tests/) — pure-function and file-I/O coverage for `sidecar.py` (synthetic `.rbxl` chunks built in [tests/helpers.py](tests/helpers.py)) and the `cloud.py`/`util.py` helpers that don't require live Roblox cloud calls (`normalizeAssetConfig`, `buildProjectionConfig`, `collectEntryFiles`, `parseSidecarBlocks`, container pack/unpack, env/version helpers). No coverage for the actual HTTP/execution-task calls — those need a real universe. Run with `pip install -e ".[test]"` then `pytest`. No lint config, no CI beyond `.github/agents/`. Distribution via `pipx install git+https://github.com/devvf/sgfl.git`.
 - Bump `version` in [pyproject.toml](pyproject.toml) for user-visible changes (v2.0.0 = the cloud-pipeline cutover; v2.1.0 = extensible `assets.json` — `mode`/`include`/`exclude`/`$version`).
 - StyLua targets latest release.
 

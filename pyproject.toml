@@ -8,7 +8,7 @@ sgfl = "sgfl.cli:app"
 [project]
 dependencies = ["typer", "requests", "python-dotenv"]
 name = "sgfl"
-version = "2.1.0"
+version = "2.2.0"
 authors = [{ name = "devvf" }]
 maintainers = [{ name = "stuart-2202" }]
 description = "A package for managing the Stuart Games Roblox workflow."
@@ -20,3 +20,10 @@ classifiers = [
 ]
 license = "MIT"
 license-files = ["LICEN[CS]E*"]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "."]
+testpaths = ["tests"]
