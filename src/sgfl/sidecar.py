@@ -46,8 +46,9 @@ ALLOWLIST = {
     ("Workspace", "RejectCharacterDeletions"): 0x12,  # tri-state enum, not bool
     # --- opaque blobs (script-unreachable state carried byte-exact) ---
     ("Workspace", "CollisionGroupData"): 0x01,
-    # --- serialized but NOT enumerated by ReflectionService (invisible to the
-    # dynamic sweep) — the engine derives visible state from these at load ---
+    # --- engine derives visible state from this at load. Since v2.1.0 the
+    # full-capability sweep also reports it dynamically; the static entry
+    # remains to pin the expected typeId ---
     ("Lighting", "Technology"): 0x12,  # drives LightingStyle/PrioritizeLightingQuality
 }
 

@@ -50,11 +50,29 @@ end
 -- Reflection + defaults caches
 ------------------------------------------------------------------------------
 
--- Instance-level unreadable-serialized baseline (ignorable internals)
+-- Full-capability enumeration: the default GetPropertiesOfClass hides
+-- capability-gated serialized props entirely (Script.Source, Lighting.Technology,
+-- SurfaceAppearance texture maps, MaterialService overrides, ...). Passing every
+-- SecurityCapability makes the sweep complete, so gated props classify as
+-- readable (text), hidden (island/sidecar), or benign — never invisible.
+local REFLECTION_OPTS = (function()
+	local ok, caps = pcall(function()
+		return SecurityCapabilities.new(table.unpack(Enum.SecurityCapability:GetEnumItems()))
+	end)
+	if not ok then
+		-- falling back to the default sweep would silently reintroduce the
+		-- blind spot AND shift island/sidecar classification — fail loud instead
+		error("full-capability reflection options failed: " .. tostring(caps) .. " — update sgfl", 0)
+	end
+	return { Security = caps }
+end)()
+
+-- Instance-level unreadable-serialized baseline (ignorable internals present on
+-- every class: AttributesSerialize, HistoryId, UniqueId, Tags, ...)
 local baselineUnreadable = {}
 do
 	local folder = Instance.new("Folder")
-	local props = ReflectionService:GetPropertiesOfClass("Folder")
+	local props = ReflectionService:GetPropertiesOfClass("Folder", REFLECTION_OPTS)
 	for _, p in props do
 		if p.Serialized then
 			local ok = pcall(function()
@@ -86,7 +104,42 @@ local BENIGN_HIDDEN = {
 	Part1Internal = true,
 	State = true,
 	EnabledInternal = true,
+	-- Studio editor/session state exposed by the full-capability sweep: never
+	-- gameplay-affecting, and several are types the binary sidecar cannot patch.
+	-- Deliberately NOT here (carried via sidecar instead): Workspace.AuthorityMode,
+	-- TextChatService.EnableProtectedChat/IsLegacyChatDisabled, SoundService
+	-- audio-API migration flags, MaterialService override names.
+	LevelOfDetail = true, -- Studio render LOD (Model/Workspace/Tool)
+	SlimHash = true, -- internal content hash
+	LuauTypeCheckMode = true, -- Studio script-analysis mode
+	PlayerModuleStatus = true, -- StarterPlayer internal
+	LocalizationMatchIdentifier = true, -- localization autoscrape state
+	LocalizationMatchedSourceText = true,
+	ChatTranslationFTUXShown = true, -- TextChatService Studio-UX state
+	ChatTranslationToggleEnabled = true,
+	HasSeenDeprecationDialog = true,
+	StudioDefaultStyleSheet = true, -- StarterGui Studio editor refs (Ref-typed)
+	StudioInsertWidgetLayerCollectorAutoLinkStyleSheet = true,
+	InternalVideoUsage = true, -- VideoFrame Roblox-managed state (not user-settable)
+	MaximumResolution = true,
 }
+
+-- Prefix-matched benign-hidden names (see BENIGN_HIDDEN)
+local BENIGN_HIDDEN_PREFIXES = {
+	"GameSettings", -- StarterPlayer avatar-testing overrides (Studio Test tab)
+}
+
+local function isBenignHidden(name: string): boolean
+	if BENIGN_HIDDEN[name] then
+		return true
+	end
+	for _, prefix in BENIGN_HIDDEN_PREFIXES do
+		if name:sub(1, #prefix) == prefix then
+			return true
+		end
+	end
+	return false
+end
 
 -- serialized-but-junk properties: session/runtime state we deliberately drop
 local SKIP_PROPS: { [string]: { [string]: boolean } } = {
@@ -107,7 +160,7 @@ local function propsOf(inst: Instance): { PropInfo }
 	local out: { PropInfo } = {}
 	local hidden: { string } = {}
 	local okProps, props = pcall(function()
-		return ReflectionService:GetPropertiesOfClass(className)
+		return ReflectionService:GetPropertiesOfClass(className, REFLECTION_OPTS)
 	end)
 	if okProps and props then
 		for _, p in props do
@@ -122,7 +175,7 @@ local function propsOf(inst: Instance): { PropInfo }
 			end)
 			if okRead then
 				table.insert(out, { name = p.Name, readable = true })
-			elseif not baselineUnreadable[p.Name] and not BENIGN_HIDDEN[p.Name] then
+			elseif not baselineUnreadable[p.Name] and not isBenignHidden(p.Name) then
 				table.insert(hidden, p.Name)
 			end
 		end
