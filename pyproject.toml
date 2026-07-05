@@ -6,9 +6,9 @@ build-backend = "hatchling.build"
 sgfl = "sgfl.cli:app"
 
 [project]
-dependencies = ["typer", "requests", "python-dotenv"]
+dependencies = ["typer", "requests", "python-dotenv", "zstandard"]
 name = "sgfl"
-version = "2.2.0"
+version = "2.2.2"
 authors = [{ name = "devvf" }]
 maintainers = [{ name = "stuart-2202" }]
 description = "A package for managing the Stuart Games Roblox workflow."

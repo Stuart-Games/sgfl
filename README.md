@@ -56,7 +56,7 @@ Example structure:
 }
 ```
 
-NB: There is support for direct service read/write and subfolder read/write but not both for the same service. In the example above you can see we save a specific folder in ServerStorage but all of MaterialService. We would not, in this case, be able to save all of ServerStorage to one file lest we have duplication in the file system. More generally, no two entries' `robloxPath` may overlap (one a prefix of the other) at any depth.
+NB: There is support for direct service read/write and subfolder read/write but not both for the same service. In the example above you can see we save a specific folder in ServerStorage but all of MaterialService. We would not, in this case, be able to save all of ServerStorage to one file lest we have duplication in the file system. More generally, no two entries' `robloxPath` may overlap (one a prefix of the other) at any depth — unless the shorter entry delegates the subtree away (see "Delegating a nested subtree" below).
 
 Each entry produces text files in its folder:
 
@@ -85,6 +85,31 @@ Entries also support a `robloxPath` deeper than two segments (e.g. `"ReplicatedS
 - **`mode: "children"`** — `folder` becomes dedicated to this entry (no other entry may share it). Produces `{Entry}.sgfl` holding only the container's own properties/attributes/tags, plus one file per managed direct child: `{ChildName}.sgfl` for text tier, `{ChildName}.sgfl.rbxm` (the whole child as one engine blob) for blob tier. `sgfl save` deletes stale `.sgfl`/`.sgfl.rbxm` files in the folder that no longer correspond to a managed child — don't put unrelated files there.
 - **`include` / `exclude`** — lists of patterns matched against direct children of the entry root only (not deeper descendants), evaluated include-then-exclude. A pattern is either a name glob (`"Temp*"`, `*` matches anything) or `"$ClassName"` (matches via `IsA`). Children that don't match are **unmanaged**: `sgfl save` never writes them and `sgfl publish`/`sgfl start` never clears them — whatever is live in the place for that child survives untouched.
 - Child names (in `mode: "children"`) must be filesystem-safe and unique case-insensitively; `sgfl save` errors out (renaming needed in Studio) rather than silently colliding or dropping data.
+
+#### Delegating a nested subtree to another entry
+
+Normally two entries can never have overlapping `robloxPath`s — not even one a prefix of the other. The one exception: an entry may hand a specific direct child off to a second, independent entry rooted at that child, by excluding the child's name from the first entry:
+
+```json
+{
+    "$version": 2,
+    "StarterGui": {
+        "folder": "gui",
+        "robloxPath": "StarterGui",
+        "mode": "children",
+        "exclude": ["Shared"]
+    },
+    "SharedGui": {
+        "folder": "sglib/Gui",
+        "robloxPath": "StarterGui.Shared",
+        "mode": "children"
+    }
+}
+```
+
+Here every other top-level `StarterGui` child still auto-splits into `gui/<Name>.sgfl`, while `StarterGui.Shared` is entirely owned by `SharedGui` — its own dedicated folder (which can live in a different repo/submodule, same as `ShipModules` does), its own mode, its own per-child files. `StarterGui` never writes, reads, or clears anything under `Shared`; `sgfl` treats it exactly like any other excluded, unmanaged child.
+
+The delegating exclude must be a **literal name glob** (`"Shared"`, `"Sh*"`, ...) — a `"$ClassName"` pattern isn't accepted for this because it can't be checked without a live instance, so it can't back the guarantee that the parent entry will truly leave that child alone. If you nest three or more levels deep, each direct link needs its own matching exclude (the top entry excluding `"Shared"` doesn't automatically cover `"Shared"`'s own child being delegated again further down — the entry that owns `StarterGui.Shared` would need to exclude that grandchild's name too).
 
 ## Installation
 

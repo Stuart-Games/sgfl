@@ -19,6 +19,7 @@ Key facts this module is built around (validated July 2026):
 
 import json
 import os
+import re
 import struct
 import time
 from typing import Optional
@@ -333,6 +334,18 @@ def rojoMountedPaths(projectJson: dict) -> list[str]:
     return paths
 
 
+def _nameGlobMatches(pattern: str, name: str) -> bool:
+    """Mirrors the name-glob branch of matchesFilterPattern in the cloud Luau
+    scripts ("*" is the only wildcard; every other character matches
+    literally). Always False for a "$ClassName" pattern — that branch needs a
+    live instance's class, which isn't available at assets.json-validation
+    time."""
+    if pattern.startswith("$"):
+        return False
+    regex = "^" + "".join(".*" if ch == "*" else re.escape(ch) for ch in pattern) + "$"
+    return re.match(regex, name) is not None
+
+
 def normalizeAssetConfig(assetTable: dict) -> dict:
     """Validate + normalize a raw assets.json table.
 
@@ -348,7 +361,11 @@ def normalizeAssetConfig(assetTable: dict) -> dict:
       this sgfl understands fails loudly with a "run sgfl update" hint.
     - children-mode folders are exclusive (not shared with any other entry).
     - no two entries' robloxPath overlap (equal, or one a prefix of the
-      other) at any depth.
+      other) at any depth — unless the shorter (ancestor) entry excludes
+      the next path segment via a literal name glob, delegating that
+      subtree to the other entry. A "$ClassName" exclude doesn't count:
+      it can't be verified without a live instance, so it can't license
+      a static delegation guarantee.
     """
     assetTable = dict(assetTable)
     version = assetTable.pop("$version", None)
@@ -439,14 +456,30 @@ def normalizeAssetConfig(assetTable: dict) -> dict:
         segmentsA = normalized[nameA]["pathSegments"]
         for nameB in names[i + 1 :]:
             segmentsB = normalized[nameB]["pathSegments"]
-            shorter, longer = (
-                (segmentsA, segmentsB) if len(segmentsA) <= len(segmentsB) else (segmentsB, segmentsA)
-            )
-            if longer[: len(shorter)] == shorter:
+            if segmentsA == segmentsB:
                 raise SGFLError(
                     f'assets.json entries "{nameA}" and "{nameB}" have overlapping robloxPath '
                     f'("{normalized[nameA]["robloxPath"]}" / "{normalized[nameB]["robloxPath"]}").',
                     suggestions=["Each entry must own a disjoint subtree."],
+                )
+            shorterName, shorter, longerName, longer = (
+                (nameA, segmentsA, nameB, segmentsB)
+                if len(segmentsA) < len(segmentsB)
+                else (nameB, segmentsB, nameA, segmentsA)
+            )
+            if longer[: len(shorter)] != shorter:
+                continue
+            delegatedSegment = longer[len(shorter)]
+            ancestorExcludes = normalized[shorterName]["exclude"]
+            if not any(_nameGlobMatches(pattern, delegatedSegment) for pattern in ancestorExcludes):
+                raise SGFLError(
+                    f'assets.json entries "{nameA}" and "{nameB}" have overlapping robloxPath '
+                    f'("{normalized[nameA]["robloxPath"]}" / "{normalized[nameB]["robloxPath"]}").',
+                    suggestions=[
+                        "Each entry must own a disjoint subtree, or delegate the nested subtree: add "
+                        f'"{delegatedSegment}" to "{shorterName}"\'s exclude list (a literal name glob, '
+                        f'not "$ClassName") to hand that child off to "{longerName}".'
+                    ],
                 )
 
     return normalized

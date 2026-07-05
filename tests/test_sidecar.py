@@ -177,6 +177,13 @@ def test_lz4_decompress_literal_only_block():
     assert sidecar.lz4Decompress(block, len(literal)) == literal
 
 
+def test_zstd_decompress_roundtrip_via_fallback_package():
+    zstandard = pytest.importorskip("zstandard")
+    payload = b"hello zstd world" * 10
+    frame = zstandard.ZstdCompressor().compress(payload)
+    assert sidecar.zstdDecompress(frame, len(payload)) == payload
+
+
 def test_deinterleave_interleave_roundtrip():
     raws = [b"\x01\x02\x03\x04", b"\x05\x06\x07\x08", b"\x09\x0a\x0b\x0c"]
     interleaved = sidecar.interleave(raws, len(raws), 4)

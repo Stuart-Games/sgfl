@@ -127,6 +127,98 @@ def test_overlapping_roblox_paths_rejected_prefix():
         )
 
 
+def test_overlap_allowed_when_ancestor_excludes_delegated_child():
+    table = cloud.normalizeAssetConfig(
+        {
+            "$version": 2,
+            "A": {
+                "folder": "src/A",
+                "robloxPath": "ServerScriptService",
+                "mode": "children",
+                "exclude": ["Sub"],
+            },
+            "B": {"folder": "src/B", "robloxPath": "ServerScriptService.Sub", "mode": "children"},
+        }
+    )
+    assert set(table.keys()) == {"A", "B"}
+
+
+def test_overlap_allowed_via_glob_star_exclude():
+    table = cloud.normalizeAssetConfig(
+        {
+            "$version": 2,
+            "A": {"folder": "src/A", "robloxPath": "StarterGui", "exclude": ["Sh*"]},
+            "B": {"folder": "src/B", "robloxPath": "StarterGui.Shared", "mode": "children"},
+        }
+    )
+    assert set(table.keys()) == {"A", "B"}
+
+
+def test_overlap_still_rejected_when_exclude_does_not_match():
+    with pytest.raises(SGFLError, match="overlapping robloxPath"):
+        cloud.normalizeAssetConfig(
+            {
+                "$version": 2,
+                "A": {"folder": "src/A", "robloxPath": "ServerScriptService", "exclude": ["Other"]},
+                "B": {"folder": "src/B", "robloxPath": "ServerScriptService.Sub"},
+            }
+        )
+
+
+def test_overlap_still_rejected_with_classname_only_exclude():
+    with pytest.raises(SGFLError, match="overlapping robloxPath"):
+        cloud.normalizeAssetConfig(
+            {
+                "$version": 2,
+                "A": {"folder": "src/A", "robloxPath": "ServerScriptService", "exclude": ["$Folder"]},
+                "B": {"folder": "src/B", "robloxPath": "ServerScriptService.Sub"},
+            }
+        )
+
+
+def test_overlap_rejected_equal_paths_even_with_exclude():
+    with pytest.raises(SGFLError, match="overlapping robloxPath"):
+        cloud.normalizeAssetConfig(
+            {
+                "$version": 2,
+                "A": {"folder": "src/A", "robloxPath": "Workspace", "exclude": ["Anything"]},
+                "B": {"folder": "src/B", "robloxPath": "Workspace"},
+            }
+        )
+
+
+def test_overlap_delegation_three_levels_needs_exclude_at_every_direct_link():
+    # each entry that would otherwise directly own the delegated child must
+    # exclude it — A excludes "Shared" (its own direct child), and B (which
+    # owns "Shared" itself) must separately exclude "Toolbar" for C to be legal
+    table = cloud.normalizeAssetConfig(
+        {
+            "$version": 2,
+            "A": {"folder": "src/A", "robloxPath": "StarterGui", "exclude": ["Shared"]},
+            "B": {
+                "folder": "src/B",
+                "robloxPath": "StarterGui.Shared",
+                "mode": "children",
+                "exclude": ["Toolbar"],
+            },
+            "C": {"folder": "src/C", "robloxPath": "StarterGui.Shared.Toolbar"},
+        }
+    )
+    assert set(table.keys()) == {"A", "B", "C"}
+
+
+def test_overlap_delegation_three_levels_rejected_if_middle_link_missing_exclude():
+    with pytest.raises(SGFLError, match="overlapping robloxPath"):
+        cloud.normalizeAssetConfig(
+            {
+                "$version": 2,
+                "A": {"folder": "src/A", "robloxPath": "StarterGui", "exclude": ["Shared"]},
+                "B": {"folder": "src/B", "robloxPath": "StarterGui.Shared", "mode": "children"},
+                "C": {"folder": "src/C", "robloxPath": "StarterGui.Shared.Toolbar"},
+            }
+        )
+
+
 def test_disjoint_roblox_paths_allowed():
     table = cloud.normalizeAssetConfig(
         {
