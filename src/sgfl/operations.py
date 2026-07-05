@@ -183,6 +183,7 @@ def startPlace(pull: bool):
 
     assetTable = _loadAssetTable()
     _checkForLegacyAssets(assetTable)
+    cloud.sweepStaleEntryFiles(assetTable)
 
     # pull and build
     if pull:
@@ -279,6 +280,8 @@ def savePlace():
         downloadKey=downloadKey,
         assetTable=assetTable,
     )
+
+    cloud.sweepStaleEntryFiles(assetTable)
 
     print(
         f"{color.GREEN}{color.BOLD}SUCCESS{color.END} "
@@ -747,6 +750,8 @@ def publishPlaces(
             f"\n{color.YELLOW}{color.BOLD}DRY-RUN{color.END} would publish to {len(places)} place(s); skipping confirmation, build, and upload."
         )
         return
+
+    cloud.sweepStaleEntryFiles(assetTable)
 
     confirmPublish(env, summaryLines)
 

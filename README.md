@@ -141,6 +141,8 @@ run the command `sgfl save`.
 
 This projects the current state of the place (latest version, saved or published — a Studio "Save" without publishing is picked up) back into the asset files, ready to commit.
 
+After writing, `sgfl` also scans the project for `.sgfl`/`.sgfl.rbxm` files that no current `assets.json` entry accounts for — leftovers from an entry you removed, or one whose `folder` you moved. It lists them and asks whether to delete, with an explicit YES/NO toggle (defaulting to NO, so you can't wipe files by accident); non-interactive sessions just list them and keep everything. The same check runs at the start of `sgfl start` and `sgfl publish`.
+
 ### To Publish
 
 run the command `sgfl publish <env>` (e.g. `sgfl publish prod`).

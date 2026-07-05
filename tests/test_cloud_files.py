@@ -94,6 +94,147 @@ def test_parse_sidecar_blocks_supports_non_dot_target(isolatedCwd):
     assert patches[("Lighting", "Technology")] == [2]
 
 
+def _staleTestConfig():
+    return cloud.normalizeAssetConfig(
+        {
+            "$version": 2,
+            "SharedGui": {
+                "folder": "sglib/Gui/Shared",
+                "robloxPath": "StarterGui.Shared",
+                "mode": "children",
+            },
+            "Lighting": {"folder": "map", "robloxPath": "Lighting"},
+            "Workspace": {"folder": "map", "robloxPath": "Workspace"},
+        }
+    )
+
+
+def test_find_stale_entry_files_flags_moved_folder_and_removed_entry(isolatedCwd):
+    assetTable = _staleTestConfig()
+    # current, expected files
+    _writeAssetFile(isolatedCwd, "sglib/Gui/Shared/SharedGui.sgfl", "[.] Folder\n")
+    _writeAssetFile(isolatedCwd, "sglib/Gui/Shared/Tools.sgfl", "[.] ScreenGui\n")
+    _writeAssetFile(isolatedCwd, "map/Lighting.sgfl", "[.] Lighting\n")
+    _writeAssetFile(isolatedCwd, "map/Workspace.sgfl", "[.] Workspace\n")
+    _writeAssetFile(isolatedCwd, "map/Workspace.sgfl.rbxm", b"\x00")  # Workspace defaults to blob
+    # leftovers: SharedGui's folder used to be sglib/Gui, and an entry was deleted
+    _writeAssetFile(isolatedCwd, "sglib/Gui/SharedGui.sgfl", "[.] Folder\n")
+    _writeAssetFile(isolatedCwd, "sglib/Gui/Tools.sgfl", "[.] ScreenGui\n")
+    _writeAssetFile(isolatedCwd, "assets/OldEntry.sgfl.rbxm", b"\x00")
+
+    assert cloud.findStaleEntryFiles(assetTable) == [
+        "assets/OldEntry.sgfl.rbxm",
+        "sglib/Gui/SharedGui.sgfl",
+        "sglib/Gui/Tools.sgfl",
+    ]
+
+
+def test_find_stale_entry_files_clean_project_finds_nothing(isolatedCwd):
+    assetTable = _staleTestConfig()
+    _writeAssetFile(isolatedCwd, "sglib/Gui/Shared/SharedGui.sgfl", "[.] Folder\n")
+    _writeAssetFile(isolatedCwd, "sglib/Gui/Shared/Tools.sgfl.rbxm", b"\x00")
+    _writeAssetFile(isolatedCwd, "map/Lighting.sgfl", "[.] Lighting\n")
+    _writeAssetFile(isolatedCwd, "map/README.md", "never touched")
+
+    assert cloud.findStaleEntryFiles(assetTable) == []
+
+
+def test_find_stale_entry_files_ignores_git_dir(isolatedCwd):
+    assetTable = _staleTestConfig()
+    _writeAssetFile(isolatedCwd, ".git/objects/whatever.sgfl", "[.] Folder\n")
+
+    assert cloud.findStaleEntryFiles(assetTable) == []
+
+
+def test_find_stale_entry_files_flags_rbxm_left_by_blob_to_text_switch(isolatedCwd):
+    assetTable = cloud.normalizeAssetConfig(
+        {"Lighting": {"folder": "map", "robloxPath": "Lighting", "format": "text"}}
+    )
+    _writeAssetFile(isolatedCwd, "map/Lighting.sgfl", "[.] Lighting\n")
+    _writeAssetFile(isolatedCwd, "map/Lighting.sgfl.rbxm", b"\x00")  # from when it was blob
+
+    assert cloud.findStaleEntryFiles(assetTable) == ["map/Lighting.sgfl.rbxm"]
+
+
+class _FakeTtyStdin:
+    def isatty(self):
+        return True
+
+
+def test_sweep_stale_deletes_only_after_yes(isolatedCwd, monkeypatch):
+    import sys
+
+    assetTable = _staleTestConfig()
+    _writeAssetFile(isolatedCwd, "sglib/Gui/SharedGui.sgfl", "[.] Folder\n")
+    _writeAssetFile(isolatedCwd, "sglib/Gui/Shared/SharedGui.sgfl", "[.] Folder\n")
+    monkeypatch.setattr(sys, "stdin", _FakeTtyStdin())
+    monkeypatch.setattr(cloud, "confirmToggle", lambda *args, **kwargs: True)
+
+    cloud.sweepStaleEntryFiles(assetTable)
+
+    assert not (isolatedCwd / "sglib/Gui/SharedGui.sgfl").exists()
+    assert (isolatedCwd / "sglib/Gui/Shared/SharedGui.sgfl").exists()
+
+
+def test_sweep_stale_keeps_files_on_no(isolatedCwd, monkeypatch):
+    import sys
+
+    assetTable = _staleTestConfig()
+    _writeAssetFile(isolatedCwd, "sglib/Gui/SharedGui.sgfl", "[.] Folder\n")
+    monkeypatch.setattr(sys, "stdin", _FakeTtyStdin())
+    monkeypatch.setattr(cloud, "confirmToggle", lambda *args, **kwargs: False)
+
+    cloud.sweepStaleEntryFiles(assetTable)
+
+    assert (isolatedCwd / "sglib/Gui/SharedGui.sgfl").exists()
+
+
+def test_sweep_stale_non_tty_lists_and_keeps(isolatedCwd, capsys):
+    assetTable = _staleTestConfig()
+    _writeAssetFile(isolatedCwd, "sglib/Gui/SharedGui.sgfl", "[.] Folder\n")
+
+    cloud.sweepStaleEntryFiles(assetTable)  # pytest's stdin is not a TTY
+
+    assert (isolatedCwd / "sglib/Gui/SharedGui.sgfl").exists()
+    out = capsys.readouterr().out
+    assert "sglib/Gui/SharedGui.sgfl" in out
+    assert "Non-interactive" in out
+
+
+def test_sweep_stale_noop_on_clean_project(isolatedCwd, capsys):
+    assetTable = _staleTestConfig()
+    _writeAssetFile(isolatedCwd, "map/Lighting.sgfl", "[.] Lighting\n")
+
+    cloud.sweepStaleEntryFiles(assetTable)  # must not print or prompt
+
+    assert capsys.readouterr().out == ""
+
+
+def test_children_sweep_removes_stale_child(isolatedCwd, capsys):
+    entries = [{"name": "Modules", "folder": "src/Modules", "mode": "children"}]
+    _writeAssetFile(isolatedCwd, "src/Modules/Modules.sgfl", "[.] Folder\n")
+    _writeAssetFile(isolatedCwd, "src/Modules/ChildA.sgfl", "[.] ModuleScript\n")
+    _writeAssetFile(isolatedCwd, "src/Modules/Renamed.sgfl", "[.] ModuleScript\n")
+    written = {"src/Modules/Modules.sgfl": b"", "src/Modules/ChildA.sgfl": b""}
+
+    cloud._sweepChildrenFolders(entries, written)
+
+    assert (isolatedCwd / "src/Modules/ChildA.sgfl").exists()
+    assert not (isolatedCwd / "src/Modules/Renamed.sgfl").exists()
+
+
+def test_children_sweep_skips_entry_that_failed_to_project(isolatedCwd):
+    entries = [{"name": "Modules", "folder": "src/Modules", "mode": "children"}]
+    _writeAssetFile(isolatedCwd, "src/Modules/Modules.sgfl", "[.] Folder\n")
+    _writeAssetFile(isolatedCwd, "src/Modules/ChildA.sgfl", "[.] ModuleScript\n")
+
+    # entry produced nothing this save (projection warning path)
+    cloud._sweepChildrenFolders(entries, {})
+
+    assert (isolatedCwd / "src/Modules/Modules.sgfl").exists()
+    assert (isolatedCwd / "src/Modules/ChildA.sgfl").exists()
+
+
 def test_build_projection_config_includes_rojo_paths_and_sidecar_props(isolatedCwd):
     (isolatedCwd / "default.project.json").write_text(
         json.dumps({"tree": {"ReplicatedFirst": {"$path": "src/ReplicatedFirst"}}})

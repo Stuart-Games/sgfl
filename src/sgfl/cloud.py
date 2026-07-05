@@ -21,6 +21,7 @@ import json
 import os
 import re
 import struct
+import sys
 import time
 from typing import Optional
 
@@ -31,6 +32,7 @@ from .util import (
     SGFLError,
     announceStep,
     color,
+    confirmToggle,
     getAbsoluteFileURI,
     getFileURI,
     maskSecret,
@@ -518,6 +520,77 @@ def buildProjectionConfig(assetTable: dict) -> dict:
     }
 
 
+def findStaleEntryFiles(assetTable: dict) -> list[str]:
+    """Scan the whole project for .sgfl / .sgfl.rbxm files that no current
+    assets.json entry accounts for — leftovers from an entry that was removed
+    or whose folder was moved.
+
+    Expected files are derived from the config (never from what a particular
+    save happened to write, so an entry that fails to project keeps its files):
+    each entry's {folder}/{Entry}.sgfl, its .sgfl.rbxm for blob-tier file-mode
+    entries, and anything directly inside a children-mode entry's dedicated
+    folder (per-child staleness there is handled on save by
+    _sweepChildrenFolders). Returns sorted project-relative paths."""
+    expectedNames = set()
+    childrenFolders = set()
+    for name, spec in assetTable.items():
+        expectedNames.add(f"{spec['folder']}/{name}.sgfl")
+        if spec["mode"] == "file" and spec["format"] == "blob":
+            expectedNames.add(f"{spec['folder']}/{name}.sgfl.rbxm")
+        if spec["mode"] == "children":
+            childrenFolders.add(spec["folder"])
+
+    projectRoot = getFileURI("")
+    stale = []
+    for dirPath, dirNames, fileNames in os.walk(projectRoot):
+        dirNames[:] = [d for d in dirNames if d != ".git"]
+        for fileName in fileNames:
+            if not (fileName.endswith(".sgfl") or fileName.endswith(".sgfl.rbxm")):
+                continue
+            relPath = os.path.relpath(os.path.join(dirPath, fileName), projectRoot).replace(os.sep, "/")
+            if relPath in expectedNames:
+                continue
+            if os.path.dirname(relPath) in childrenFolders:
+                continue
+            stale.append(relPath)
+    return sorted(stale)
+
+
+def sweepStaleEntryFiles(assetTable: dict) -> None:
+    """List stale entry files (see findStaleEntryFiles) and offer to delete
+    them. Deletion always requires an explicit YES on the arrow-key toggle
+    (default NO); non-interactive sessions list the files and keep them."""
+    stale = findStaleEntryFiles(assetTable)
+    if not stale:
+        return
+
+    print(
+        f"{color.YELLOW}{color.BOLD}WARN{color.END} "
+        f"{len(stale)} entry file(s) found that no assets.json entry accounts for "
+        f"(entry removed, or its folder moved):"
+    )
+    for relPath in stale:
+        print(f"        - {relPath}")
+
+    if not sys.stdin.isatty():
+        print(
+            f"{color.YELLOW}{color.BOLD}WARN{color.END} "
+            "Non-interactive session — keeping them. Re-run from a terminal to clean up."
+        )
+        return
+
+    message = (
+        f"{color.RED}{color.BOLD}Delete these {len(stale)} stale file(s)?{color.END}"
+        f"  (←/→ to choose, Enter to commit)"
+    )
+    if not confirmToggle(message, defaultYes=False):
+        announceStep("Keeping stale entry files.")
+        return
+    for relPath in stale:
+        os.remove(getFileURI(relPath))
+        print(f"{color.YELLOW}{color.BOLD}WARN{color.END} deleted stale entry file: {relPath}")
+
+
 def loadCloudScript(name: str, config: dict, postapplySource: Optional[str] = None) -> str:
     path = getAbsoluteFileURI(f"lua/cloud/{name}")
     with open(path, "r", encoding="utf-8") as f:
@@ -654,16 +727,26 @@ def runProjectionSave(
         with open(target, "wb") as f:
             f.write(data)
 
-    # children-mode folders are dedicated and fully sgfl-managed: any .sgfl /
-    # .sgfl.rbxm file in the folder that wasn't just written this save is a
-    # stale leftover (e.g. from a deleted or renamed child) and is removed.
-    for entry in config["entries"]:
+    _sweepChildrenFolders(config["entries"], files)
+
+    return placeVersion
+
+
+def _sweepChildrenFolders(entries: list, writtenFiles: dict) -> None:
+    """children-mode folders are dedicated and fully sgfl-managed: any .sgfl /
+    .sgfl.rbxm file in the folder that wasn't just written this save is a
+    stale leftover (e.g. from a deleted or renamed child) and is removed.
+    An entry that failed to project writes nothing this save — its folder is
+    skipped so a transient error can't wipe committed child files."""
+    for entry in entries:
         if entry["mode"] != "children":
+            continue
+        if f"{entry['folder']}/{entry['name']}.sgfl" not in writtenFiles:
             continue
         folderPath = getFileURI(entry["folder"])
         if not os.path.isdir(folderPath):
             continue
-        written = {name for name in files if name.startswith(entry["folder"] + "/")}
+        written = {name for name in writtenFiles if name.startswith(entry["folder"] + "/")}
         for fileName in os.listdir(folderPath):
             if not (fileName.endswith(".sgfl") or fileName.endswith(".sgfl.rbxm")):
                 continue
@@ -672,8 +755,6 @@ def runProjectionSave(
                 continue
             os.remove(getFileURI(relPath))
             print(f"{color.YELLOW}{color.BOLD}WARN{color.END} deleted stale unmanaged file: {relPath}")
-
-    return placeVersion
 
 
 # ---------------------------------------------------------------------------
