@@ -176,6 +176,49 @@ def test_sweep_stale_deletes_only_after_yes(isolatedCwd, monkeypatch):
     assert (isolatedCwd / "sglib/Gui/Shared/SharedGui.sgfl").exists()
 
 
+def test_sweep_stale_removes_emptied_folders(isolatedCwd, monkeypatch):
+    import sys
+
+    assetTable = _staleTestConfig()
+    # entry folder was moved: old location holds only stale files
+    _writeAssetFile(isolatedCwd, "old/deep/Lighting.sgfl", "[.] Lighting\n")
+    _writeAssetFile(isolatedCwd, "old/deep/Lighting.sgfl.rbxm", b"\x00")
+    monkeypatch.setattr(sys, "stdin", _FakeTtyStdin())
+    monkeypatch.setattr(cloud, "confirmToggle", lambda *args, **kwargs: True)
+
+    cloud.sweepStaleEntryFiles(assetTable)
+
+    assert not (isolatedCwd / "old").exists()
+
+
+def test_sweep_stale_keeps_folders_with_other_content(isolatedCwd, monkeypatch):
+    import sys
+
+    assetTable = _staleTestConfig()
+    _writeAssetFile(isolatedCwd, "old/art/Lighting.sgfl", "[.] Lighting\n")
+    _writeAssetFile(isolatedCwd, "old/art/source.blend", b"\x00art\x00")
+    monkeypatch.setattr(sys, "stdin", _FakeTtyStdin())
+    monkeypatch.setattr(cloud, "confirmToggle", lambda *args, **kwargs: True)
+
+    cloud.sweepStaleEntryFiles(assetTable)
+
+    assert not (isolatedCwd / "old/art/Lighting.sgfl").exists()
+    assert (isolatedCwd / "old/art/source.blend").exists()
+
+
+def test_sweep_stale_keeps_folders_on_no(isolatedCwd, monkeypatch):
+    import sys
+
+    assetTable = _staleTestConfig()
+    _writeAssetFile(isolatedCwd, "old/Lighting.sgfl", "[.] Lighting\n")
+    monkeypatch.setattr(sys, "stdin", _FakeTtyStdin())
+    monkeypatch.setattr(cloud, "confirmToggle", lambda *args, **kwargs: False)
+
+    cloud.sweepStaleEntryFiles(assetTable)
+
+    assert (isolatedCwd / "old/Lighting.sgfl").exists()
+
+
 def test_sweep_stale_keeps_files_on_no(isolatedCwd, monkeypatch):
     import sys
 
