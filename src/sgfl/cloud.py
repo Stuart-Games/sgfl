@@ -589,6 +589,25 @@ def sweepStaleEntryFiles(assetTable: dict) -> None:
     for relPath in stale:
         os.remove(getFileURI(relPath))
         print(f"{color.YELLOW}{color.BOLD}WARN{color.END} deleted stale entry file: {relPath}")
+    for relPath in stale:
+        _removeEmptyParentDirs(relPath)
+
+
+def _removeEmptyParentDirs(relPath: str) -> None:
+    """Remove directories left empty by deleting relPath, walking up toward
+    the project root (which is never removed). Any other content — art
+    sources, READMEs, .gitkeep — keeps a directory alive: os.rmdir refuses
+    non-empty directories, and the first refusal stops the walk."""
+    projectRoot = os.path.abspath(getFileURI(""))
+    dirPath = os.path.abspath(os.path.dirname(getFileURI(relPath)))
+    while dirPath != projectRoot and os.path.commonpath([projectRoot, dirPath]) == projectRoot:
+        try:
+            os.rmdir(dirPath)
+        except OSError:
+            return
+        rel = os.path.relpath(dirPath, projectRoot).replace(os.sep, "/")
+        print(f"{color.YELLOW}{color.BOLD}WARN{color.END} deleted empty folder: {rel}")
+        dirPath = os.path.dirname(dirPath)
 
 
 def loadCloudScript(name: str, config: dict, postapplySource: Optional[str] = None) -> str:

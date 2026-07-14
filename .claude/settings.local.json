@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "WebFetch(domain:lune-org.github.io)"
+      "WebFetch(domain:lune-org.github.io)",
+      "mcp__roblox-docs__roblox_search_devforum"
     ]
   }
 }
