@@ -160,6 +160,24 @@ local classProps: { [string]: { PropInfo } } = {}
 local classHiddenState: { [string]: { string } } = {} -- props forcing blob island
 local classDefaults: { [string]: { [string]: any } | false } = {}
 
+-- Some serialized member names the reflection sweep reports are deprecated
+-- lowercase aliases (Part.size, Part.shape, ...) whose getters still work but
+-- whose setters are gone — projecting them makes apply's write throw. When the
+-- capitalized modern name reads back the same value, project that instead.
+local function canonicalPropName(inst: Instance, name: string, value: any): string
+	if not name:sub(1, 1):match("%l") then
+		return name
+	end
+	local canonical = name:sub(1, 1):upper() .. name:sub(2)
+	local ok, sameValue = pcall(function()
+		return (inst :: any)[canonical] == value
+	end)
+	if ok and sameValue == true then
+		return canonical
+	end
+	return name
+end
+
 local function propsOf(inst: Instance): { PropInfo }
 	local className = inst.ClassName
 	if classProps[className] then
@@ -168,6 +186,7 @@ local function propsOf(inst: Instance): { PropInfo }
 	local skip = SKIP_PROPS[className]
 	local out: { PropInfo } = {}
 	local hidden: { string } = {}
+	local seen: { [string]: boolean } = {}
 	local okProps, props = pcall(function()
 		return ReflectionService:GetPropertiesOfClass(className, REFLECTION_OPTS)
 	end)
@@ -179,11 +198,15 @@ local function propsOf(inst: Instance): { PropInfo }
 			if skip and skip[p.Name] then
 				continue
 			end
-			local okRead = pcall(function()
+			local okRead, value = pcall(function()
 				return (inst :: any)[p.Name]
 			end)
 			if okRead then
-				table.insert(out, { name = p.Name, readable = true })
+				local name = canonicalPropName(inst, p.Name, value)
+				if not seen[name] then
+					seen[name] = true
+					table.insert(out, { name = name, readable = true })
+				end
 			elseif not baselineUnreadable[p.Name] and not isBenignHidden(p.Name) then
 				table.insert(hidden, p.Name)
 			end

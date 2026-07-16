@@ -582,6 +582,14 @@ local function applyProps(inst: Instance, block: Block, entryRoot: Instance, pat
 		local okSet, setErr = pcall(function()
 			(inst :: any)[name] = value
 		end)
+		if not okSet and name:sub(1, 1):match("%l") then
+			-- Files saved before the canonical-name fix carry deprecated
+			-- lowercase serialized aliases (size, shape, ...) whose setters
+			-- are gone; retry with the capitalized modern name
+			okSet = pcall(function()
+				(inst :: any)[name:sub(1, 1):upper() .. name:sub(2)] = value
+			end)
+		end
 		if not okSet then
 			if not routeToPatch(inst, entryRoot, name, value) then
 				addWarning(pathLabel .. "." .. name .. " set failed: " .. tostring(setErr))
