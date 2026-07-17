@@ -96,7 +96,7 @@ end
 
 -- Hidden props that are derivable/regenerable and therefore do NOT force a blob island
 local BENIGN_HIDDEN = {
-	Color3uint8 = true, -- backed by readable Color
+	Color3uint8 = true, -- backed by readable Color (projected via PROXY_PROPS)
 	MaterialVariantSerialized = true, -- backed by readable MaterialVariant
 	WorldPivotData = true, -- backed by readable WorldPivot
 	ScaleFactor = true, -- Model:GetScale()
@@ -149,6 +149,17 @@ local function isBenignHidden(name: string): boolean
 	end
 	return false
 end
+
+-- Readable proxy properties whose serialized backing is a BENIGN_HIDDEN variant.
+-- The reflection sweep skips the proxy itself (Serialized=false, so propsOf
+-- filters it) AND drops the backing as benign-hidden, so without this the value
+-- is silently lost in the text tier (e.g. BasePart.Color, backed by the hidden
+-- Color3uint8). We re-inject the readable proxy into propsOf so it projects with
+-- normal default-elision and sorting; apply sets it back through its ordinary
+-- settable-property path (no decoder change needed). Keyed by an IsA class name.
+local PROXY_PROPS: { { isA: string, props: { string } } } = {
+	{ isA = "BasePart", props = { "Color" } }, -- backing: Color3uint8
+}
 
 -- serialized-but-junk properties: session/runtime state we deliberately drop
 local SKIP_PROPS: { [string]: { [string]: boolean } } = {
@@ -213,6 +224,24 @@ local function propsOf(inst: Instance): { PropInfo }
 		end
 	else
 		addWarning(className .. ": GetPropertiesOfClass failed: " .. tostring(props))
+	end
+	-- re-inject readable proxy props the sweep skipped (Serialized=false) whose
+	-- serialized backing is benign-hidden — otherwise their value is lost (Color)
+	for _, mapping in PROXY_PROPS do
+		if inst:IsA(mapping.isA) then
+			for _, name in mapping.props do
+				if seen[name] then
+					continue
+				end
+				local okRead = pcall(function()
+					return (inst :: any)[name]
+				end)
+				if okRead then
+					seen[name] = true
+					table.insert(out, { name = name, readable = true })
+				end
+			end
+		end
 	end
 	table.sort(out, function(a, b)
 		return a.name < b.name
