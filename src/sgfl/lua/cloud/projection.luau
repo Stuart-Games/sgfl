@@ -159,6 +159,7 @@ end
 -- settable-property path (no decoder change needed). Keyed by an IsA class name.
 local PROXY_PROPS: { { isA: string, props: { string } } } = {
 	{ isA = "BasePart", props = { "Color" } }, -- backing: Color3uint8
+	{ isA = "WeldConstraint", props = { "Enabled", "Part0", "Part1" } }, -- backing: State/Part0Internal/Part1Internal
 }
 
 -- serialized-but-junk properties: session/runtime state we deliberately drop

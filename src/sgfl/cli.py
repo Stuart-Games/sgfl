@@ -1,6 +1,14 @@
+import sys
+
 import typer
 
 from .sgfl import start, save, init, publish, migrate, update, authLoginCmd, authStatusCmd
+
+# Legacy Windows consoles decode stdout as cp1252, which cannot encode the
+# arrow glyphs in interactive prompts; replace rather than crash mid-task
+for stream in (sys.stdout, sys.stderr):
+    if hasattr(stream, "reconfigure"):
+        stream.reconfigure(errors="replace")
 
 app = typer.Typer(pretty_exceptions_enable=False)
 app.command()(start)
