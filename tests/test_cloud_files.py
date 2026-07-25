@@ -94,163 +94,189 @@ def test_parse_sidecar_blocks_supports_non_dot_target(isolatedCwd):
     assert patches[("Lighting", "Technology")] == [2]
 
 
-def _staleTestConfig():
-    return cloud.normalizeAssetConfig(
-        {
-            "$version": 2,
-            "SharedGui": {
-                "folder": "sglib/Gui/Shared",
-                "robloxPath": "StarterGui.Shared",
-                "mode": "children",
-            },
-            "Lighting": {"folder": "map", "robloxPath": "Lighting"},
-            "Workspace": {"folder": "map", "robloxPath": "Workspace"},
-        }
-    )
-
-
-def test_find_stale_entry_files_flags_moved_folder_and_removed_entry(isolatedCwd):
-    assetTable = _staleTestConfig()
-    # current, expected files
-    _writeAssetFile(isolatedCwd, "sglib/Gui/Shared/SharedGui.sgfl", "[.] Folder\n")
-    _writeAssetFile(isolatedCwd, "sglib/Gui/Shared/Tools.sgfl", "[.] ScreenGui\n")
-    _writeAssetFile(isolatedCwd, "map/Lighting.sgfl", "[.] Lighting\n")
-    _writeAssetFile(isolatedCwd, "map/Workspace.sgfl", "[.] Workspace\n")
-    _writeAssetFile(isolatedCwd, "map/Workspace.sgfl.rbxm", b"\x00")  # Workspace defaults to blob
-    # leftovers: SharedGui's folder used to be sglib/Gui, and an entry was deleted
-    _writeAssetFile(isolatedCwd, "sglib/Gui/SharedGui.sgfl", "[.] Folder\n")
-    _writeAssetFile(isolatedCwd, "sglib/Gui/Tools.sgfl", "[.] ScreenGui\n")
-    _writeAssetFile(isolatedCwd, "assets/OldEntry.sgfl.rbxm", b"\x00")
-
-    assert cloud.findStaleEntryFiles(assetTable) == [
-        "assets/OldEntry.sgfl.rbxm",
-        "sglib/Gui/SharedGui.sgfl",
-        "sglib/Gui/Tools.sgfl",
-    ]
-
-
-def test_find_stale_entry_files_clean_project_finds_nothing(isolatedCwd):
-    assetTable = _staleTestConfig()
-    _writeAssetFile(isolatedCwd, "sglib/Gui/Shared/SharedGui.sgfl", "[.] Folder\n")
-    _writeAssetFile(isolatedCwd, "sglib/Gui/Shared/Tools.sgfl.rbxm", b"\x00")
-    _writeAssetFile(isolatedCwd, "map/Lighting.sgfl", "[.] Lighting\n")
-    _writeAssetFile(isolatedCwd, "map/README.md", "never touched")
-
-    assert cloud.findStaleEntryFiles(assetTable) == []
-
-
-def test_find_stale_entry_files_ignores_git_dir(isolatedCwd):
-    assetTable = _staleTestConfig()
-    _writeAssetFile(isolatedCwd, ".git/objects/whatever.sgfl", "[.] Folder\n")
-
-    assert cloud.findStaleEntryFiles(assetTable) == []
-
-
-def test_find_stale_entry_files_flags_rbxm_left_by_blob_to_text_switch(isolatedCwd):
-    assetTable = cloud.normalizeAssetConfig(
-        {"Lighting": {"folder": "map", "robloxPath": "Lighting", "format": "text"}}
-    )
-    _writeAssetFile(isolatedCwd, "map/Lighting.sgfl", "[.] Lighting\n")
-    _writeAssetFile(isolatedCwd, "map/Lighting.sgfl.rbxm", b"\x00")  # from when it was blob
-
-    assert cloud.findStaleEntryFiles(assetTable) == ["map/Lighting.sgfl.rbxm"]
-
-
 class _FakeTtyStdin:
     def isatty(self):
         return True
 
 
-def test_sweep_stale_deletes_only_after_yes(isolatedCwd, monkeypatch):
-    import sys
+def test_entry_files_outside_declared_paths_are_inert(isolatedCwd):
+    """No project-wide stale sweep exists (and none is needed): files sgfl does
+    not own — a vendored library, a submodule, a sibling game — are never read
+    for publish, so they cannot affect the place."""
+    assert not hasattr(cloud, "sweepStaleEntryFiles")
+    assert not hasattr(cloud, "findStaleEntryFiles")
 
-    assetTable = _staleTestConfig()
-    _writeAssetFile(isolatedCwd, "sglib/Gui/SharedGui.sgfl", "[.] Folder\n")
-    _writeAssetFile(isolatedCwd, "sglib/Gui/Shared/SharedGui.sgfl", "[.] Folder\n")
-    monkeypatch.setattr(sys, "stdin", _FakeTtyStdin())
-    monkeypatch.setattr(cloud, "confirmToggle", lambda *args, **kwargs: True)
-
-    cloud.sweepStaleEntryFiles(assetTable)
-
-    assert not (isolatedCwd / "sglib/Gui/SharedGui.sgfl").exists()
-    assert (isolatedCwd / "sglib/Gui/Shared/SharedGui.sgfl").exists()
-
-
-def test_sweep_stale_removes_emptied_folders(isolatedCwd, monkeypatch):
-    import sys
-
-    assetTable = _staleTestConfig()
-    # entry folder was moved: old location holds only stale files
-    _writeAssetFile(isolatedCwd, "old/deep/Lighting.sgfl", "[.] Lighting\n")
-    _writeAssetFile(isolatedCwd, "old/deep/Lighting.sgfl.rbxm", b"\x00")
-    monkeypatch.setattr(sys, "stdin", _FakeTtyStdin())
-    monkeypatch.setattr(cloud, "confirmToggle", lambda *args, **kwargs: True)
-
-    cloud.sweepStaleEntryFiles(assetTable)
-
-    assert not (isolatedCwd / "old").exists()
-
-
-def test_sweep_stale_keeps_folders_with_other_content(isolatedCwd, monkeypatch):
-    import sys
-
-    assetTable = _staleTestConfig()
-    _writeAssetFile(isolatedCwd, "old/art/Lighting.sgfl", "[.] Lighting\n")
-    _writeAssetFile(isolatedCwd, "old/art/source.blend", b"\x00art\x00")
-    monkeypatch.setattr(sys, "stdin", _FakeTtyStdin())
-    monkeypatch.setattr(cloud, "confirmToggle", lambda *args, **kwargs: True)
-
-    cloud.sweepStaleEntryFiles(assetTable)
-
-    assert not (isolatedCwd / "old/art/Lighting.sgfl").exists()
-    assert (isolatedCwd / "old/art/source.blend").exists()
-
-
-def test_sweep_stale_keeps_folders_on_no(isolatedCwd, monkeypatch):
-    import sys
-
-    assetTable = _staleTestConfig()
-    _writeAssetFile(isolatedCwd, "old/Lighting.sgfl", "[.] Lighting\n")
-    monkeypatch.setattr(sys, "stdin", _FakeTtyStdin())
-    monkeypatch.setattr(cloud, "confirmToggle", lambda *args, **kwargs: False)
-
-    cloud.sweepStaleEntryFiles(assetTable)
-
-    assert (isolatedCwd / "old/Lighting.sgfl").exists()
-
-
-def test_sweep_stale_keeps_files_on_no(isolatedCwd, monkeypatch):
-    import sys
-
-    assetTable = _staleTestConfig()
-    _writeAssetFile(isolatedCwd, "sglib/Gui/SharedGui.sgfl", "[.] Folder\n")
-    monkeypatch.setattr(sys, "stdin", _FakeTtyStdin())
-    monkeypatch.setattr(cloud, "confirmToggle", lambda *args, **kwargs: False)
-
-    cloud.sweepStaleEntryFiles(assetTable)
-
-    assert (isolatedCwd / "sglib/Gui/SharedGui.sgfl").exists()
-
-
-def test_sweep_stale_non_tty_lists_and_keeps(isolatedCwd, capsys):
-    assetTable = _staleTestConfig()
-    _writeAssetFile(isolatedCwd, "sglib/Gui/SharedGui.sgfl", "[.] Folder\n")
-
-    cloud.sweepStaleEntryFiles(assetTable)  # pytest's stdin is not a TTY
-
-    assert (isolatedCwd / "sglib/Gui/SharedGui.sgfl").exists()
-    out = capsys.readouterr().out
-    assert "sglib/Gui/SharedGui.sgfl" in out
-    assert "Non-interactive" in out
-
-
-def test_sweep_stale_noop_on_clean_project(isolatedCwd, capsys):
-    assetTable = _staleTestConfig()
+    assetTable = cloud.normalizeAssetConfig(
+        {"Lighting": {"folder": "map", "robloxPath": "Lighting", "format": "text"}}
+    )
     _writeAssetFile(isolatedCwd, "map/Lighting.sgfl", "[.] Lighting\n")
+    # a library the project vendors, plus a leftover from a renamed entry
+    _writeAssetFile(isolatedCwd, "sglib/Gui/SharedGui.sgfl", "[.] Folder\n")
+    _writeAssetFile(isolatedCwd, "map/OldName.sgfl", "[.] Lighting\n")
 
-    cloud.sweepStaleEntryFiles(assetTable)  # must not print or prompt
+    assert [name for name, _ in cloud.collectEntryFiles(assetTable)] == ["map/Lighting.sgfl"]
+    assert (isolatedCwd / "sglib/Gui/SharedGui.sgfl").exists()
+    assert (isolatedCwd / "map/OldName.sgfl").exists()
+
+
+def test_count_blocks_ignores_sidecar_markers_and_heredoc_bodies():
+    text = (
+        b"[.] Lighting\n"
+        b"Brightness = 2\n"
+        b"[Part] Part\n"
+        b"Source = <<<\n"
+        b"\t[not a block]\n"
+        b"\t>>>\n"
+        b"[Mesh] MeshPart !blob\n"
+        b"!data = AAAA\n"
+        b"\n"
+        b"[!sidecar .]\n"
+        b"Technology = 3\n"
+    )
+    assert cloud._countBlocks(text) == 3
+    assert cloud._countBlocks(b"[.] Lighting\n") == 1
+    assert cloud._countBlocks(b"") == 0
+
+
+def test_emptied_entries_flags_text_entry_that_lost_every_child(isolatedCwd):
+    entries = [{"name": "Lighting", "folder": "map", "format": "text", "mode": "file"}]
+    _writeAssetFile(isolatedCwd, "map/Lighting.sgfl", "[.] Lighting\n[Sky] Sky\n[Fog] Atmosphere\n")
+
+    emptied = cloud._emptiedEntries(entries, {"map/Lighting.sgfl": b"[.] Lighting\n"})
+
+    assert len(emptied) == 1
+    assert "Lighting" in emptied[0] and "3 blocks -> 1" in emptied[0]
+
+
+def test_emptied_entries_ignores_entry_that_still_has_content(isolatedCwd):
+    entries = [{"name": "Lighting", "folder": "map", "format": "text", "mode": "file"}]
+    _writeAssetFile(isolatedCwd, "map/Lighting.sgfl", "[.] Lighting\n[Sky] Sky\n")
+
+    files = {"map/Lighting.sgfl": b"[.] Lighting\n[Sky] Sky\n[Fog] Atmosphere\n"}
+    assert cloud._emptiedEntries(entries, files) == []
+
+
+def test_emptied_entries_ignores_first_save_of_a_new_entry(isolatedCwd):
+    entries = [{"name": "Lighting", "folder": "map", "format": "text", "mode": "file"}]
+    assert cloud._emptiedEntries(entries, {"map/Lighting.sgfl": b"[.] Lighting\n"}) == []
+
+
+def test_emptied_entries_ignores_entry_that_failed_to_project(isolatedCwd):
+    entries = [{"name": "Lighting", "folder": "map", "format": "text", "mode": "file"}]
+    _writeAssetFile(isolatedCwd, "map/Lighting.sgfl", "[.] Lighting\n[Sky] Sky\n")
+
+    # projection warned and produced nothing for this entry — its files stand
+    assert cloud._emptiedEntries(entries, {}) == []
+
+
+def test_emptied_entries_flags_blob_entry_that_lost_its_children_blob(isolatedCwd):
+    entries = [{"name": "Workspace", "folder": "map", "format": "blob", "mode": "file"}]
+    _writeAssetFile(isolatedCwd, "map/Workspace.sgfl", "[.] Workspace\n")
+    _writeAssetFile(isolatedCwd, "map/Workspace.sgfl.rbxm", b"\x00blob\x00")
+
+    emptied = cloud._emptiedEntries(entries, {"map/Workspace.sgfl": b"[.] Workspace\n"})
+
+    assert len(emptied) == 1
+    assert "map/Workspace.sgfl.rbxm" in emptied[0]
+
+
+def test_emptied_entries_ignores_blob_entry_that_still_has_a_blob(isolatedCwd):
+    entries = [{"name": "Workspace", "folder": "map", "format": "blob", "mode": "file"}]
+    _writeAssetFile(isolatedCwd, "map/Workspace.sgfl", "[.] Workspace\n")
+    _writeAssetFile(isolatedCwd, "map/Workspace.sgfl.rbxm", b"\x00blob\x00")
+
+    files = {"map/Workspace.sgfl": b"[.] Workspace\n", "map/Workspace.sgfl.rbxm": b"\x00new\x00"}
+    assert cloud._emptiedEntries(entries, files) == []
+
+
+def test_emptied_entries_flags_children_entry_that_lost_every_child(isolatedCwd):
+    entries = [{"name": "Modules", "folder": "src/Modules", "format": "text", "mode": "children"}]
+    _writeAssetFile(isolatedCwd, "src/Modules/Modules.sgfl", "[.] Folder\n")
+    _writeAssetFile(isolatedCwd, "src/Modules/ChildA.sgfl", "[.] ModuleScript\n")
+    _writeAssetFile(isolatedCwd, "src/Modules/ChildB.sgfl.rbxm", b"blob")
+
+    emptied = cloud._emptiedEntries(entries, {"src/Modules/Modules.sgfl": b"[.] Folder\n"})
+
+    assert len(emptied) == 1
+    assert "2 child file(s) -> 0" in emptied[0]
+
+
+def test_emptied_entries_ignores_children_entry_that_still_has_children(isolatedCwd):
+    entries = [{"name": "Modules", "folder": "src/Modules", "format": "text", "mode": "children"}]
+    _writeAssetFile(isolatedCwd, "src/Modules/Modules.sgfl", "[.] Folder\n")
+    _writeAssetFile(isolatedCwd, "src/Modules/ChildA.sgfl", "[.] ModuleScript\n")
+
+    files = {"src/Modules/Modules.sgfl": b"[.] Folder\n", "src/Modules/ChildA.sgfl": b"[.] ModuleScript\n"}
+    assert cloud._emptiedEntries(entries, files) == []
+
+
+def test_emptied_entries_children_root_block_count_is_not_a_signal(isolatedCwd):
+    """A children-mode root file is always a single block (container props
+    only) — it must never be read as "emptied"."""
+    entries = [{"name": "Modules", "folder": "src/Modules", "format": "text", "mode": "children"}]
+    _writeAssetFile(isolatedCwd, "src/Modules/Modules.sgfl", "[.] Folder\n")
+    _writeAssetFile(isolatedCwd, "src/Modules/ChildA.sgfl", "[.] ModuleScript\n")
+
+    files = {"src/Modules/Modules.sgfl": b"[.] Folder\n", "src/Modules/ChildA.sgfl": b"[.] ModuleScript\n"}
+    assert cloud._emptiedEntries(entries, files) == []
+
+
+def test_guard_emptied_entries_aborts_non_interactive_session(isolatedCwd):
+    entries = [{"name": "Lighting", "folder": "map", "format": "text", "mode": "file"}]
+    _writeAssetFile(isolatedCwd, "map/Lighting.sgfl", "[.] Lighting\n[Sky] Sky\n")
+
+    with pytest.raises(SGFLError):
+        cloud._guardEmptiedEntries(entries, {"map/Lighting.sgfl": b"[.] Lighting\n"}, 41)
+
+
+def test_guard_emptied_entries_aborts_when_user_declines(isolatedCwd, monkeypatch):
+    import sys
+
+    entries = [{"name": "Lighting", "folder": "map", "format": "text", "mode": "file"}]
+    _writeAssetFile(isolatedCwd, "map/Lighting.sgfl", "[.] Lighting\n[Sky] Sky\n")
+    monkeypatch.setattr(sys, "stdin", _FakeTtyStdin())
+    monkeypatch.setattr(cloud, "confirmToggle", lambda *args, **kwargs: False)
+
+    with pytest.raises(SGFLError):
+        cloud._guardEmptiedEntries(entries, {"map/Lighting.sgfl": b"[.] Lighting\n"}, 41)
+
+
+def test_guard_emptied_entries_proceeds_when_user_confirms(isolatedCwd, monkeypatch):
+    import sys
+
+    entries = [{"name": "Lighting", "folder": "map", "format": "text", "mode": "file"}]
+    _writeAssetFile(isolatedCwd, "map/Lighting.sgfl", "[.] Lighting\n[Sky] Sky\n")
+    monkeypatch.setattr(sys, "stdin", _FakeTtyStdin())
+    monkeypatch.setattr(cloud, "confirmToggle", lambda *args, **kwargs: True)
+
+    cloud._guardEmptiedEntries(entries, {"map/Lighting.sgfl": b"[.] Lighting\n"}, 41)
+
+
+def test_guard_emptied_entries_silent_on_a_normal_save(isolatedCwd, capsys):
+    entries = [{"name": "Lighting", "folder": "map", "format": "text", "mode": "file"}]
+    _writeAssetFile(isolatedCwd, "map/Lighting.sgfl", "[.] Lighting\n[Sky] Sky\n")
+
+    cloud._guardEmptiedEntries(entries, {"map/Lighting.sgfl": b"[.] Lighting\n[Sky] Sky\n"}, 41)
 
     assert capsys.readouterr().out == ""
+
+
+def test_post_save_version_prefers_engine_reported_version(capsys):
+    assert cloud._postSaveVersion({"savedVersion": 42}, 41) == 42
+    assert capsys.readouterr().out == ""
+
+
+def test_post_save_version_warns_when_another_version_landed(capsys):
+    assert cloud._postSaveVersion({"savedVersion": 44}, 41) == 44
+    assert "while the apply task ran" in capsys.readouterr().out
+
+
+def test_post_save_version_falls_back_when_engine_reports_nothing_useful():
+    assert cloud._postSaveVersion({}, 41) == 42
+    assert cloud._postSaveVersion({"savedVersion": 41}, 41) == 42  # PlaceVersion not refreshed
+    assert cloud._postSaveVersion({"savedVersion": None}, 41) == 42
+    assert cloud._postSaveVersion({"savedVersion": "44"}, 41) == 42
+    assert cloud._postSaveVersion({"savedVersion": True}, 41) == 42
 
 
 def test_children_sweep_removes_stale_child(isolatedCwd, capsys):
@@ -298,3 +324,20 @@ def test_build_projection_config_no_project_json(isolatedCwd):
     )
     config = cloud.buildProjectionConfig(assetTable)
     assert config["rojoPaths"] == []
+
+
+def test_emptied_entries_does_not_count_a_nested_entrys_files_as_children(isolatedCwd):
+    """A nested entry's folder can live under a children-mode folder; its files
+    must not make the outer entry look populated."""
+    entries = [{"name": "Modules", "folder": "src/Modules", "format": "text", "mode": "children"}]
+    _writeAssetFile(isolatedCwd, "src/Modules/Modules.sgfl", "[.] Folder\n")
+    _writeAssetFile(isolatedCwd, "src/Modules/ChildA.sgfl", "[.] ModuleScript\n")
+
+    files = {
+        "src/Modules/Modules.sgfl": b"[.] Folder\n",
+        "src/Modules/Nested/Other.sgfl": b"[.] Folder\n",
+    }
+    emptied = cloud._emptiedEntries(entries, files)
+
+    assert len(emptied) == 1
+    assert "1 child file(s) -> 0" in emptied[0]

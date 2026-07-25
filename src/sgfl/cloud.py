@@ -520,94 +520,18 @@ def buildProjectionConfig(assetTable: dict) -> dict:
     }
 
 
-def findStaleEntryFiles(assetTable: dict) -> list[str]:
-    """Scan the whole project for .sgfl / .sgfl.rbxm files that no current
-    assets.json entry accounts for — leftovers from an entry that was removed
-    or whose folder was moved.
-
-    Expected files are derived from the config (never from what a particular
-    save happened to write, so an entry that fails to project keeps its files):
-    each entry's {folder}/{Entry}.sgfl, its .sgfl.rbxm for blob-tier file-mode
-    entries, and anything directly inside a children-mode entry's dedicated
-    folder (per-child staleness there is handled on save by
-    _sweepChildrenFolders). Returns sorted project-relative paths."""
-    expectedNames = set()
-    childrenFolders = set()
-    for name, spec in assetTable.items():
-        expectedNames.add(f"{spec['folder']}/{name}.sgfl")
-        if spec["mode"] == "file" and spec["format"] == "blob":
-            expectedNames.add(f"{spec['folder']}/{name}.sgfl.rbxm")
-        if spec["mode"] == "children":
-            childrenFolders.add(spec["folder"])
-
-    projectRoot = getFileURI("")
-    stale = []
-    for dirPath, dirNames, fileNames in os.walk(projectRoot):
-        dirNames[:] = [d for d in dirNames if d != ".git"]
-        for fileName in fileNames:
-            if not (fileName.endswith(".sgfl") or fileName.endswith(".sgfl.rbxm")):
-                continue
-            relPath = os.path.relpath(os.path.join(dirPath, fileName), projectRoot).replace(os.sep, "/")
-            if relPath in expectedNames:
-                continue
-            if os.path.dirname(relPath) in childrenFolders:
-                continue
-            stale.append(relPath)
-    return sorted(stale)
-
-
-def sweepStaleEntryFiles(assetTable: dict) -> None:
-    """List stale entry files (see findStaleEntryFiles) and offer to delete
-    them. Deletion always requires an explicit YES on the arrow-key toggle
-    (default NO); non-interactive sessions list the files and keep them."""
-    stale = findStaleEntryFiles(assetTable)
-    if not stale:
-        return
-
-    print(
-        f"{color.YELLOW}{color.BOLD}WARN{color.END} "
-        f"{len(stale)} entry file(s) found that no assets.json entry accounts for "
-        f"(entry removed, or its folder moved):"
-    )
-    for relPath in stale:
-        print(f"        - {relPath}")
-
-    if not sys.stdin.isatty():
-        print(
-            f"{color.YELLOW}{color.BOLD}WARN{color.END} "
-            "Non-interactive session — keeping them. Re-run from a terminal to clean up."
-        )
-        return
-
-    message = (
-        f"{color.RED}{color.BOLD}Delete these {len(stale)} stale file(s)?{color.END}"
-        f"  (←/→ to choose, Enter to commit)"
-    )
-    if not confirmToggle(message, defaultYes=False):
-        announceStep("Keeping stale entry files.")
-        return
-    for relPath in stale:
-        os.remove(getFileURI(relPath))
-        print(f"{color.YELLOW}{color.BOLD}WARN{color.END} deleted stale entry file: {relPath}")
-    for relPath in stale:
-        _removeEmptyParentDirs(relPath)
-
-
-def _removeEmptyParentDirs(relPath: str) -> None:
-    """Remove directories left empty by deleting relPath, walking up toward
-    the project root (which is never removed). Any other content — art
-    sources, READMEs, .gitkeep — keeps a directory alive: os.rmdir refuses
-    non-empty directories, and the first refusal stops the walk."""
-    projectRoot = os.path.abspath(getFileURI(""))
-    dirPath = os.path.abspath(os.path.dirname(getFileURI(relPath)))
-    while dirPath != projectRoot and os.path.commonpath([projectRoot, dirPath]) == projectRoot:
-        try:
-            os.rmdir(dirPath)
-        except OSError:
-            return
-        rel = os.path.relpath(dirPath, projectRoot).replace(os.sep, "/")
-        print(f"{color.YELLOW}{color.BOLD}WARN{color.END} deleted empty folder: {rel}")
-        dirPath = os.path.dirname(dirPath)
+# NOTE: sgfl deliberately has no project-wide "stale entry file" sweep. Files
+# outside the exact paths an entry owns are inert — collectEntryFiles reads
+# strictly {folder}/{Entry}.sgfl(.rbxm) per declared entry, and apply.luau only
+# sees what was shipped — so a leftover from a removed/renamed/moved entry
+# cannot affect the place. A project-wide scan cannot tell such a leftover from
+# a vendored library, git submodule, sibling game in a monorepo, or a branch
+# where the entry does not exist yet, all of which legitimately carry .sgfl
+# files this project's assets.json says nothing about. Deleting those is
+# unrecoverable for untracked files, so the sweep was removed in v2.4.0.
+# The one deletion that IS load-bearing is _sweepChildrenFolders (below):
+# children-mode folders are dedicated and every .sgfl in them is shipped and
+# applied, so a leftover there resurrects a deleted child.
 
 
 def loadCloudScript(name: str, config: dict, postapplySource: Optional[str] = None) -> str:
@@ -739,6 +663,8 @@ def runProjectionSave(
             block = "[!sidecar .]\n" + "\n".join(sidecarLines)
             files[textName] = files[textName].rstrip(b"\n") + b"\n\n" + block.encode("utf-8") + b"\n"
 
+    _guardEmptiedEntries(config["entries"], files, placeVersion)
+
     announceStep(f"Writing {len(files)} entry files.")
     for name, data in sorted(files.items()):
         target = getFileURI(name)
@@ -749,6 +675,125 @@ def runProjectionSave(
     _sweepChildrenFolders(config["entries"], files)
 
     return placeVersion
+
+
+def _countBlocks(data: bytes) -> int:
+    """Number of instance blocks in a .sgfl text projection.
+
+    Block headers ("[path] ClassName", optionally " !blob") are the only
+    unindented lines starting with "["; heredoc bodies are tab-prefixed, and
+    driver-appended "[!sidecar ...]" markers are not instances."""
+    return sum(1 for line in data.split(b"\n") if line.startswith(b"[") and not line.startswith(b"[!"))
+
+
+def _emptiedEntries(entries: list, files: dict) -> list[str]:
+    """Entries whose projection came back empty this save while the committed
+    files for that entry still hold content. Returns human-readable labels.
+
+    Only entries that actually projected are considered — one that failed
+    writes nothing at all and keeps its files (see _sweepChildrenFolders)."""
+    emptied = []
+    for entry in entries:
+        rootName = f"{entry['folder']}/{entry['name']}.sgfl"
+        if rootName not in files:
+            continue
+
+        if entry["mode"] == "children":
+            prefix = entry["folder"] + "/"
+            # direct children only: a nested entry's folder can sit underneath
+            # this one and its files must not be counted as this entry's
+            newChildren = sum(
+                1
+                for name in files
+                if name.startswith(prefix) and name != rootName and "/" not in name[len(prefix) :]
+            )
+            if newChildren:
+                continue
+            folderPath = getFileURI(entry["folder"])
+            if not os.path.isdir(folderPath):
+                continue
+            oldChildren = [
+                fileName
+                for fileName in os.listdir(folderPath)
+                if fileName != f"{entry['name']}.sgfl"
+                and (fileName.endswith(".sgfl") or fileName.endswith(".sgfl.rbxm"))
+            ]
+            if oldChildren:
+                emptied.append(f"{entry['name']} ({entry['folder']}/): {len(oldChildren)} child file(s) -> 0")
+            continue
+
+        if entry["format"] == "blob":
+            blobName = f"{entry['folder']}/{entry['name']}.sgfl.rbxm"
+            if blobName in files:
+                continue
+            if os.path.isfile(getFileURI(blobName)):
+                emptied.append(f"{entry['name']} ({blobName}): children blob -> no children")
+            continue
+
+        rootPath = getFileURI(rootName)
+        if not os.path.isfile(rootPath):
+            continue
+        with open(rootPath, "rb") as f:
+            oldBlocks = _countBlocks(f.read())
+        newBlocks = _countBlocks(files[rootName])
+        if oldBlocks > 1 and newBlocks <= 1:
+            emptied.append(f"{entry['name']} ({rootName}): {oldBlocks} blocks -> {newBlocks}")
+    return emptied
+
+
+def _guardEmptiedEntries(entries: list, files: dict, placeVersion: int) -> None:
+    """Confirm before a save that would empty entries which still have content
+    on disk. Nothing has been written when this runs, so declining is free.
+
+    The dangerous path this exists for: a `sgfl start`/`publish` that dies after
+    uploading the rojo-built base (scripts only, no assets) but before the apply
+    task's SavePlaceAsync — a rate-limited task creation, a Luau error, Ctrl+C
+    during the multi-minute poll. The place's latest version is then an
+    asset-less skeleton, and `sgfl save` (which reads the latest version, saved
+    or published) would happily project it over every entry file in the repo.
+    Clearing a whole subtree on purpose is rare, so this asks rather than
+    refuses; a non-interactive session writes nothing."""
+    emptied = _emptiedEntries(entries, files)
+    if not emptied:
+        return
+
+    noun = "entry" if len(emptied) == 1 else "entries"
+    print(
+        f"{color.RED}{color.BOLD}STOP{color.END} "
+        f"place version {placeVersion} projects {len(emptied)} {noun} as EMPTY, "
+        f"but they still have content on disk:"
+    )
+    for label in emptied:
+        print(f"        - {label}")
+    print(
+        f"{color.YELLOW}{color.BOLD}WARN{color.END} "
+        f"If you did not just clear these in Studio, the place's latest version is probably a "
+        f"failed build (a `sgfl start`/`publish` that died before applying uploads a scripts-only "
+        f"base version). Re-publish first, then save."
+    )
+
+    if not sys.stdin.isatty():
+        raise SGFLError(
+            "Refusing to overwrite entry files with an empty projection in a non-interactive session.",
+            details="Emptied: " + "; ".join(emptied),
+            suggestions=[
+                "Nothing was written.",
+                "Re-run from a terminal to confirm, or re-publish the place first.",
+            ],
+        )
+
+    message = (
+        f"{color.RED}{color.BOLD}Write the empty projection over these files?{color.END}"
+        f"  (←/→ to choose, Enter to commit)"
+    )
+    if not confirmToggle(message, defaultYes=False):
+        raise SGFLError(
+            "Save aborted — entry files left untouched.",
+            suggestions=[
+                "Re-publish the place (sgfl start) so its latest version has your assets, then save.",
+                "If the emptying is intentional, re-run and confirm.",
+            ],
+        )
 
 
 def _sweepChildrenFolders(entries: list, writtenFiles: dict) -> None:
@@ -892,6 +937,28 @@ def uploadPlaceVersion(
     return response.json()["versionNumber"]
 
 
+def _postSaveVersion(applyResult: dict, baseVersion: int) -> int:
+    """Version the apply task's SavePlaceAsync produced.
+
+    apply.luau reports game.PlaceVersion after the save. If the engine updated
+    it in-session we get the authoritative number (and a concurrent writer just
+    means a gap); if it did not, the value is <= baseVersion and we fall back to
+    the documented baseVersion + 1."""
+    reported = applyResult.get("savedVersion")
+    if isinstance(reported, bool) or not isinstance(reported, (int, float)):
+        return baseVersion + 1
+    reported = int(reported)
+    if reported <= baseVersion:
+        return baseVersion + 1
+    if reported != baseVersion + 1:
+        print(
+            f"{color.YELLOW}{color.BOLD}WARN{color.END} "
+            f"Another version landed on this place while the apply task ran "
+            f"(base {baseVersion}, applied {reported}) — using the engine-reported version."
+        )
+    return reported
+
+
 def buildFinalPlace(
     *,
     universeId: str,
@@ -964,9 +1031,29 @@ def buildFinalPlace(
             ],
         )
 
-    savedVersion = baseVersion + 1
+    # Which version did the session's SavePlaceAsync produce? baseVersion + 1
+    # is only true if nothing else wrote to the place during the task — and the
+    # task runs for minutes, so a second developer's `sgfl start` (its base
+    # upload takes a version) or a Studio save can slip in and shift it. Trust
+    # the engine's own post-save PlaceVersion when it reports one; the +1
+    # assumption is the fallback for engine versions that don't update it.
+    savedVersion = _postSaveVersion(applyResult, baseVersion)
     announceStep(f"Downloading applied place (version {savedVersion}) for sidecar patch.")
     finalBytes = downloadPlaceFile(basePlaceId, downloadKey, savedVersion)
+    if finalBytes == baseBytes:
+        # We got back the unapplied rojo build — assets never landed. Publishing
+        # this would strip every asset from the live game.
+        raise SGFLError(
+            f"Place version {savedVersion} is byte-identical to the unapplied base build.",
+            details=(
+                "The apply task's saved version could not be identified — most likely another "
+                "publish or a Studio save landed on this place while the task was running."
+            ),
+            suggestions=[
+                "Nothing was uploaded. Make sure no one else is publishing this place, then re-run.",
+                "Check the place's version history in Studio to see what landed.",
+            ],
+        )
 
     patches = parseSidecarBlocks(assetTable)
     for item in applyResult.get("patchProps") or []:

@@ -672,8 +672,19 @@ local function mergeTerrain(deserialized: Instance)
 	end
 end
 
-local function reparentBlobChildren(list: { Instance }, target: Instance)
+-- `entry`, when given, filters the incoming instances through the entry's
+-- include/exclude rules: a blob written before a child was excluded still
+-- carries that child, and clearEntryRoot deliberately leaves the live one
+-- alone, so re-parenting it unchecked would duplicate it.
+local function reparentBlobChildren(list: { Instance }, target: Instance, entry)
 	for _, inst in list do
+		if entry and not isManaged(inst, entry) then
+			addWarning(
+				entry.name .. ": ignoring unmanaged instance " .. inst.Name .. " from blob (include/exclude filter)"
+			)
+			inst:Destroy()
+			continue
+		end
 		if inst.ClassName == "Terrain" and target == workspace then
 			mergeTerrain(inst)
 		else
@@ -874,7 +885,7 @@ for _, entry in CONFIG.entries do
 					return SerializationService:DeserializeInstancesAsync(buffer.fromstring(data))
 				end)
 				if okDeser then
-					reparentBlobChildren(listOrErr :: { Instance }, root)
+					reparentBlobChildren(listOrErr :: { Instance }, root, entry)
 				else
 					addWarning(entry.name .. ": child blob " .. fileName .. " deserialize failed: " .. tostring(
 						listOrErr
@@ -905,6 +916,18 @@ for _, entry in CONFIG.entries do
 				end
 				local newChild = child :: Instance
 				newChild.Name = childName
+				-- filters are evaluated after construction because "$ClassName"
+				-- rules need a real instance: a leftover file for a child the
+				-- entry no longer manages (one just added to `exclude`) must not
+				-- be applied, or it lands beside the live child clearEntryRoot
+				-- deliberately kept and the place gains a duplicate
+				if not isManaged(newChild, entry) then
+					addWarning(
+						entry.name .. ": ignoring file for unmanaged child " .. childName .. " (include/exclude filter)"
+					)
+					newChild:Destroy()
+					continue
+				end
 				newChild.Parent = root
 				applyBlocks(childBlocks, newChild, newChild, entry.name .. ":" .. childName)
 			end
@@ -950,7 +973,7 @@ for _, entry in CONFIG.entries do
 			return SerializationService:DeserializeInstancesAsync(buffer.fromstring(blobData))
 		end)
 		if okDeser then
-			reparentBlobChildren(listOrErr :: { Instance }, root)
+			reparentBlobChildren(listOrErr :: { Instance }, root, entry)
 		else
 			addWarning(entry.name .. ": blob deserialize failed: " .. tostring(listOrErr))
 		end
@@ -1023,8 +1046,13 @@ end
 local baseVersion = game.PlaceVersion
 AssetService:SavePlaceAsync()
 
+-- The driver needs the version this save produced: baseVersion + 1 only holds
+-- if nothing else wrote to the place during the (multi-minute) task. Report
+-- PlaceVersion again — if the engine refreshed it, that number is
+-- authoritative; if not, it still equals baseVersion and the driver falls back.
 return {
 	baseVersion = baseVersion,
+	savedVersion = game.PlaceVersion,
 	appliedEntries = appliedEntries,
 	resolvedRefs = resolvedRefs,
 	failedRefs = failedRefs,

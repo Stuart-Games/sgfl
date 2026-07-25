@@ -83,7 +83,7 @@ Entries also support a `robloxPath` deeper than two segments (e.g. `"ReplicatedS
 
 - **`mode: "file"`** (default) — the whole subtree in one `{Entry}.sgfl` (+ `.sgfl.rbxm` for blob tier), as above.
 - **`mode: "children"`** — `folder` becomes dedicated to this entry (no other entry may share it). Produces `{Entry}.sgfl` holding only the container's own properties/attributes/tags, plus one file per managed direct child: `{ChildName}.sgfl` for text tier, `{ChildName}.sgfl.rbxm` (the whole child as one engine blob) for blob tier. `sgfl save` deletes stale `.sgfl`/`.sgfl.rbxm` files in the folder that no longer correspond to a managed child — don't put unrelated files there.
-- **`include` / `exclude`** — lists of patterns matched against direct children of the entry root only (not deeper descendants), evaluated include-then-exclude. A pattern is either a name glob (`"Temp*"`, `*` matches anything) or `"$ClassName"` (matches via `IsA`). Children that don't match are **unmanaged**: `sgfl save` never writes them and `sgfl publish`/`sgfl start` never clears them — whatever is live in the place for that child survives untouched.
+- **`include` / `exclude`** — lists of patterns matched against direct children of the entry root only (not deeper descendants), evaluated include-then-exclude. A pattern is either a name glob (`"Temp*"`, `*` matches anything) or `"$ClassName"` (matches via `IsA`). Children that don't match are **unmanaged**: `sgfl save` never writes them and `sgfl publish`/`sgfl start` never clears them — whatever is live in the place for that child survives untouched. A file left over from before a child was excluded is ignored on publish too, so excluding a child can't duplicate it.
 - Child names (in `mode: "children"`) must be filesystem-safe and unique case-insensitively; `sgfl save` errors out (renaming needed in Studio) rather than silently colliding or dropping data.
 
 #### Delegating a nested subtree to another entry
@@ -135,13 +135,17 @@ run the command `sgfl start`.
 
 This builds the place with rojo, applies the saved asset files inside a cloud engine session, publishes the result, then opens Roblox Studio and VS Code and runs `rojo serve` for live script sync.
 
+Avoid running `sgfl start` or `sgfl publish` against the same place at the same time as a teammate: each run creates place versions while the cloud session works, and overlapping runs can each end up looking at the other's version. `sgfl` detects the common cases and aborts rather than publishing the wrong build, but the safe habit is one publisher at a time.
+
 ### To Save
 
 run the command `sgfl save`.
 
 This projects the current state of the place (latest version, saved or published — a Studio "Save" without publishing is picked up) back into the asset files, ready to commit.
 
-After writing, `sgfl` also scans the project for `.sgfl`/`.sgfl.rbxm` files that no current `assets.json` entry accounts for — leftovers from an entry you removed, or one whose `folder` you moved. It lists them and asks whether to delete, with an explicit YES/NO toggle (defaulting to NO, so you can't wipe files by accident); non-interactive sessions just list them and keep everything. The same check runs at the start of `sgfl start` and `sgfl publish`.
+Before anything is written, `sgfl` checks whether the projection would empty an entry that currently has content committed. If so it lists them and asks for an explicit YES/NO confirmation (defaulting to NO); a non-interactive session writes nothing at all. The usual cause is not that you cleared something in Studio, but that a `sgfl start`/`publish` died partway: those commands upload the rojo build (scripts only, no assets) to the place *before* applying your asset files, so a failed run leaves the place's latest version empty of assets — re-publish before saving. Files sgfl doesn't own (entries you removed, vendored libraries, other games in the same repo) are never touched: only the exact `{folder}/{Entry}.sgfl` paths your `assets.json` declares are read or written. Leftovers are inert; delete them yourself whenever you like.
+
+`sgfl` refuses to run outside a project — if there's no `assets.json` in the current directory you get an error rather than a run against default settings.
 
 ### To Publish
 

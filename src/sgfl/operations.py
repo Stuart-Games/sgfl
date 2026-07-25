@@ -126,11 +126,27 @@ def _withAuthorizationWarning(
 
 
 def _loadAssetTable() -> dict:
-    configPath = (
-        ASSET_CONFIG_FILE_PATH
-        if os.path.exists(ASSET_CONFIG_FILE_PATH)
-        else getAbsoluteFileURI("json/default.assets.json")
-    )
+    """Read and normalize this project's assets.json.
+
+    Never falls back to the packaged default table: that default describes a
+    different project, so silently adopting it (the usual cause is running sgfl
+    from the wrong directory, or a subdirectory of the project) would have save
+    write entry files into invented folders and publish apply the wrong set of
+    entries. `sgfl init` is the only command that touches the default."""
+    # resolved per call rather than via the import-time ASSET_CONFIG_FILE_PATH
+    # constant, so the path always reflects the actual working directory
+    configPath = getFileURI("assets.json")
+    if not os.path.exists(configPath):
+        raise SGFLError(
+            "No assets.json found in the current directory.",
+            details=f"Looked for: {configPath}.",
+            suggestions=[
+                "Run sgfl from the project root (the folder holding assets.json and default.project.json).",
+                "Run sgfl init to scaffold a new project here.",
+                "sgfl no longer falls back to its built-in default entry list — if you relied on that, "
+                "commit an assets.json (sgfl init writes the default one).",
+            ],
+        )
     return cloud.normalizeAssetConfig(getTableFromJsonFile(configPath))
 
 
@@ -183,7 +199,6 @@ def startPlace(pull: bool):
 
     assetTable = _loadAssetTable()
     _checkForLegacyAssets(assetTable)
-    cloud.sweepStaleEntryFiles(assetTable)
 
     # pull and build
     if pull:
@@ -280,8 +295,6 @@ def savePlace():
         downloadKey=downloadKey,
         assetTable=assetTable,
     )
-
-    cloud.sweepStaleEntryFiles(assetTable)
 
     print(
         f"{color.GREEN}{color.BOLD}SUCCESS{color.END} "
@@ -750,8 +763,6 @@ def publishPlaces(
             f"\n{color.YELLOW}{color.BOLD}DRY-RUN{color.END} would publish to {len(places)} place(s); skipping confirmation, build, and upload."
         )
         return
-
-    cloud.sweepStaleEntryFiles(assetTable)
 
     confirmPublish(env, summaryLines)
 
