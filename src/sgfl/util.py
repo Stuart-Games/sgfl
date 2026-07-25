@@ -390,7 +390,7 @@ CREDENTIAL_KEYS = ["PUBLISH_KEY", "DOWNLOAD_KEY", "EXECUTION_KEY", "USER_ID"]
 UPDATE_CACHE_PATH = os.path.join(CREDENTIALS_DIR, "update_check.json")
 UPDATE_CHECK_TTL_SECONDS = 24 * 60 * 60
 UPDATE_PYPROJECT_URL = (
-    "https://raw.githubusercontent.com/devvf/sgfl/main/pyproject.toml"
+    "https://raw.githubusercontent.com/Stuart-Games/sgfl/main/pyproject.toml"
 )
 UPDATE_HTTP_TIMEOUT_SECONDS = 3
 

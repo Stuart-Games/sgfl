@@ -573,7 +573,7 @@ def runUpdate():
         ["pipx", "upgrade", "sgfl"],
         suggestions=[
             "Ensure pipx is installed and on PATH (see https://pipx.pypa.io/).",
-            "If sgfl was not installed via pipx, reinstall with: pipx install --force git+https://github.com/devvf/sgfl.git",
+            "If sgfl was not installed via pipx, reinstall with: pipx install --force git+https://github.com/Stuart-Games/sgfl.git",
         ],
         captureOutput=False,
     )

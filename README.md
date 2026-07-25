@@ -113,7 +113,7 @@ The delegating exclude must be a **literal name glob** (`"Shared"`, `"Sh*"`, ...
 
 ## Installation
 
-run the command `pipx install git+https://github.com/devvf/sgfl.git`.
+run the command `pipx install git+https://github.com/Stuart-Games/sgfl.git`.
 
 ## Upgrading
 
