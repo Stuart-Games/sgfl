@@ -32,7 +32,9 @@ UNIVERSE_ID    the id of the experience it belongs to
 
 For multi-place publishing, an `.env.<env>` file (e.g. `.env.prod`) holds one `PLACE_ID_<NAME>` per target place plus `UNIVERSE_ID`. These files contain only ids and are safe to commit.
 
-`PLACE_ID_BUILD` is reserved. It designates an empty scratch place in the same universe that the cloud apply runs against, and it is never published to. Declare one: the apply uploads an asset-less base version to its target place before applying your entry files, so if the task fails, that target is left holding a build with no assets. Pointing it at a scratch place keeps that off your live places entirely.
+`PLACE_ID_BUILD` is reserved. It designates an empty scratch place the cloud apply runs against, and it is never published to. Declare one: the apply uploads an asset-less base version to its target place before applying your entry files, so if the task fails, that target is left holding a build with no assets. Pointing it at a scratch place keeps that off your live places entirely.
+
+`UNIVERSE_ID_BUILD` is optional and puts that scratch place in a universe of its own. Without it the build place must live in `UNIVERSE_ID` (execution tasks are universe-scoped). With it, a build resolves no publish targets at all — it needs only those two ids and the three keys, so a build job can run holding nothing that can reach a real game, and one build place can serve every repo in an org. See [Using sgfl across an organization](#using-sgfl-across-an-organization).
 
 Values already present in the environment take precedence over `.env.<env>` (a warning names any that were shadowed), so CI can supply ids and keys as secrets without the committed file overriding them.
 
@@ -214,7 +216,11 @@ Approvals stay per repo — GitHub environments can't be defined org-wide — so
 
 **Pin `sgflRef` per repo.** Floating on `main` means one sgfl change can break every game at once. Pinning lets you roll the fleet forward one repo at a time.
 
-**Each universe needs its own scratch build place.** Execution tasks are universe-scoped, so `PLACE_ID_BUILD` cannot be shared between games — one empty place per universe, declared in that repo's `.env.<env>`.
+**Either give each universe its own scratch build place, or give the org one.** Execution tasks are universe-scoped, so by default `PLACE_ID_BUILD` must live in that game's `UNIVERSE_ID` — one empty place per universe, declared in that repo's `.env.<env>`.
+
+The alternative is a single build universe shared by every repo, set with `UNIVERSE_ID_BUILD` + `PLACE_ID_BUILD`. It is worth doing: the build keys then scope to a universe containing no game, so build credentials genuinely cannot reach a live place, and both ids become org constants that can live in the reusable workflow instead of every repo's env file. The cost is that many repos build against one place concurrently, so sgfl stops inferring which version its apply produced — if the engine doesn't report it, the build fails loudly rather than risk downloading another project's place file. Those failures are re-runnable; a wrong guess would not be recoverable.
+
+GitHub cannot serialize this for you, incidentally: `concurrency` groups are scoped per repository, so a group defined in a reusable workflow won't serialize runs from different callers. That's the reason the guard lives in sgfl.
 
 **The rate limit is per key owner, not per key.** Task creation is capped at 5/minute for whoever owns the key, so every game sharing the group's key draws on one budget, and issuing more keys under the same group buys nothing. One `sgfl build` is one task, so this only bites when several games build at once; sgfl backs off and retries on 429 rather than failing. The per-repo concurrency group serializes a single repo, not the org.
 
