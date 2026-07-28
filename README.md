@@ -119,6 +119,8 @@ The delegating exclude must be a **literal name glob** (`"Shared"`, `"Sh*"`, ...
 
 run the command `pipx install git+https://github.com/Stuart-Games/sgfl.git`.
 
+That tracks `main`. CI and anything that needs a reproducible build should pin to a release tag instead — `pipx install git+https://github.com/Stuart-Games/sgfl.git@v2.5.0`. Releases are cut automatically from the `version` field in `pyproject.toml` whenever it changes on `main`, so every version that exists has a tag.
+
 ## Upgrading
 
 run the command `sgfl update` (or `pipx upgrade sgfl`) to update to the newest version if available.
