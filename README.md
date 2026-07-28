@@ -19,7 +19,7 @@ Set these once with `sgfl auth login` (check them with `sgfl auth status`):
 ```
 USER_ID        your user id with edit perms
 PUBLISH_KEY    Open Cloud key with place-publish scope
-DOWNLOAD_KEY   Open Cloud key with asset-delivery (download) scope
+DOWNLOAD_KEY   Open Cloud key with asset-delivery (download) scope + Assets read
 EXECUTION_KEY  Open Cloud key for Luau Execution Sessions (read + write), scoped to the universe
 ```
 
@@ -216,6 +216,8 @@ jobs:
 Approvals stay per repo — GitHub environments can't be defined org-wide — so each game still needs its `production` environment with required reviewers under Settings → Environments.
 
 **Keep the sgfl version in the reusable workflow, not the caller.** A per-repo `sgflRef` means upgrading the fleet is one PR per game, which is how repos quietly fall years behind. Put the version in the workflow's input default instead: one bump reaches everything, and the `v1` tag on the workflow repo is the lever if you need to stage a rollout. A workflow that only builds can float on `main` outright — it ships nothing to players, so a bad sgfl change surfaces as a red smoke run, which is the early warning you want.
+
+**Grant `DOWNLOAD_KEY` the Assets read permission on the build universe.** Nothing hands sgfl the version its apply produced — `SavePlaceAsync` returns nothing and the engine doesn't refresh `PlaceVersion` in-session — so without it sgfl assumes the save took `base + 1`. That's true only while nothing else writes to the place during the several minutes a task runs. With the permission, sgfl reads the versions that actually exist and knows. It's a read, scoped to the build universe like everything else, so it widens nothing.
 
 **Nothing serializes a shared build place, so sgfl fails loud instead.** Many repos building against one place means nothing guarantees the version your apply produced is the next one — and GitHub can't fix that upstream, because `concurrency` groups are scoped to the triggering repository and a group defined in a reusable workflow won't span callers. So with `UNIVERSE_ID_BUILD` set, sgfl stops inferring: if the engine doesn't report the version it saved, the build fails rather than risk downloading a version another repo's build made. Those failures are re-runnable; publishing another game's place file would not be.
 

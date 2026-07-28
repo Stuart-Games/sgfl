@@ -142,7 +142,7 @@ def test_shared_build_place_refuses_to_guess(applyResult):
     with pytest.raises(SGFLError) as excinfo:
         cloud._postSaveVersion(applyResult, 8, strict=True)
 
-    assert "did not report" in excinfo.value.message
+    assert "Assets read permission" in " ".join(excinfo.value.suggestions)
 
 
 def test_shared_build_place_accepts_a_reported_version(capsys):
@@ -150,6 +150,73 @@ def test_shared_build_place_accepts_a_reported_version(capsys):
     regardless of who else wrote to the place."""
     assert cloud._postSaveVersion({"savedVersion": 14}, 8, strict=True) == 14
     assert "WARN" in capsys.readouterr().out
+
+
+# --- version listing -------------------------------------------------------
+
+
+def test_a_single_new_version_is_ours_with_certainty():
+    """The engine reports nothing usable, but exactly one version appeared —
+    no inference needed, and strict mode has nothing to object to."""
+    assert cloud._postSaveVersion({"savedVersion": 8}, 8, [8, 9, 7], strict=True) == 9
+
+
+def test_listing_beats_the_plus_one_assumption():
+    """Someone took 9 before our save landed on 10. The old arithmetic would
+    have downloaded 9 — the other writer's file."""
+    assert cloud._postSaveVersion({}, 8, [10], strict=False) == 10
+
+
+def test_several_new_versions_is_a_real_collision():
+    with pytest.raises(SGFLError) as excinfo:
+        cloud._postSaveVersion({}, 8, [9, 10], strict=True)
+
+    assert "More than one" in excinfo.value.message
+
+
+def test_a_collision_still_infers_when_the_place_is_private(capsys):
+    assert cloud._postSaveVersion({}, 8, [9, 10], strict=False) == 9
+    assert "WARN" in capsys.readouterr().out
+
+
+def test_a_stale_listing_does_not_claim_the_save_failed():
+    """Listing may lag the save. Treat "nothing newer" as no information, not
+    as evidence that SavePlaceAsync did nothing."""
+    assert cloud._postSaveVersion({}, 8, [8, 7], strict=False) == 9
+
+    with pytest.raises(SGFLError):
+        cloud._postSaveVersion({}, 8, [8, 7], strict=True)
+
+
+def test_version_numbers_are_read_out_of_the_path(monkeypatch):
+    payload = {
+        "assetVersions": [
+            {"path": "assets/123/versions/11"},
+            {"path": "assets/123/versions/10"},
+            {"path": "malformed"},
+        ]
+    }
+
+    class FakeResponse:
+        def json(self):
+            return payload
+
+    monkeypatch.setattr(cloud, "_cloudRequest", lambda *a, **k: FakeResponse())
+
+    assert cloud.listPlaceVersions("123", "key") == [11, 10]
+
+
+def test_an_unavailable_listing_degrades_rather_than_raising(monkeypatch, capsys):
+    """A missing Assets permission must not break builds that never needed the
+    listing — it costs confidence, and the caller decides if that matters."""
+
+    def denied(*args, **kwargs):
+        raise SGFLError("Roblox API request failed (HTTP 403).")
+
+    monkeypatch.setattr(cloud, "_cloudRequest", denied)
+
+    assert cloud.listPlaceVersions("123", "key") is None
+    assert "Assets read permission" in capsys.readouterr().out
 
 
 # --- authorization ---------------------------------------------------------
