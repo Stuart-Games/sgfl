@@ -226,13 +226,22 @@ def build(
     Runs rojo plus the cloud apply against the scratch build place
     (PLACE_ID_BUILD) and writes sidecar-patched bytes to --out. Publish them
     later with `sgfl upload`. Safe to run unattended: no live place is touched.
+
+    Resolves no publish targets, so with UNIVERSE_ID_BUILD set it needs no
+    place ID belonging to the game at all.
     """
     loadCredentials()
     _runTask(
         "build",
         detailed=detailed,
         pullEnabled=False,
-        envDiagnosticKeys=["UNIVERSE_ID", "PUBLISH_KEY", "DOWNLOAD_KEY", "EXECUTION_KEY"],
+        envDiagnosticKeys=[
+            "UNIVERSE_ID",
+            "UNIVERSE_ID_BUILD",
+            "PUBLISH_KEY",
+            "DOWNLOAD_KEY",
+            "EXECUTION_KEY",
+        ],
         fn=lambda: buildArtifact(env, outPath=out, noBuild=noBuild),
     )
 
@@ -375,7 +384,13 @@ def publish(
         "publish",
         detailed=detailed,
         pullEnabled=False,
-        envDiagnosticKeys=["UNIVERSE_ID", "PUBLISH_KEY", "DOWNLOAD_KEY", "EXECUTION_KEY"],
+        envDiagnosticKeys=[
+            "UNIVERSE_ID",
+            "UNIVERSE_ID_BUILD",
+            "PUBLISH_KEY",
+            "DOWNLOAD_KEY",
+            "EXECUTION_KEY",
+        ],
         fn=lambda: publishPlaces(
             env,
             dryRun=dryRun,

@@ -68,7 +68,7 @@ class SGFLError(Exception):
 
 
 API_ENV_KEYS = ["PUBLISH_KEY", "DOWNLOAD_KEY", "EXECUTION_KEY"]
-ID_ENV_KEYS = ["PLACE_ID", "UNIVERSE_ID", "USER_ID"]
+ID_ENV_KEYS = ["PLACE_ID", "UNIVERSE_ID", "UNIVERSE_ID_BUILD", "USER_ID"]
 
 # Keys the process was started with, captured before any dotenv load. These
 # outrank .env.<env> so a CI runner's secrets can't be clobbered by committed
@@ -589,6 +589,18 @@ _PLACE_ID_PATTERN = re.compile(r"^PLACE_ID_(.+)$")
 # Reserved place name. PLACE_ID_BUILD designates a scratch place used as the
 # apply target for the cloud pipeline; it is never a publish destination.
 BUILD_PLACE_NAME = "build"
+
+# Optional: put the build place in a universe of its own. Execution tasks are
+# universe-scoped, so this is what lets the build credentials be scoped to a
+# universe that contains no game — and, because a build then needs no publish
+# target at all, what lets one build place serve every repo in an org.
+BUILD_UNIVERSE_KEY = "UNIVERSE_ID_BUILD"
+
+
+def getBuildUniverseId() -> Optional[str]:
+    """The dedicated build universe, or None when builds run inside UNIVERSE_ID."""
+    value = (os.environ.get(BUILD_UNIVERSE_KEY) or "").strip()
+    return value or None
 
 
 def loadEnvFile(env: str) -> Optional[str]:

@@ -1040,19 +1040,49 @@ def uploadPlaceVersion(
     return response.json()["versionNumber"]
 
 
-def _postSaveVersion(applyResult: dict, baseVersion: int) -> int:
+def _unreportedSaveVersion(baseVersion: int, strict: bool, why: str) -> int:
+    if not strict:
+        return baseVersion + 1
+    raise SGFLError(
+        "The apply task did not report which version it saved.",
+        details=(
+            f"Base version {baseVersion}, but {why}. On a build place that other "
+            "projects also build against, assuming version "
+            f"{baseVersion + 1} could download a different project's place file."
+        ),
+        suggestions=[
+            "Nothing was uploaded. Re-run the build — this is usually transient.",
+            "If it persists, the engine version pinned to this place stopped refreshing "
+            "PlaceVersion in-session; give this project its own build place "
+            "(unset UNIVERSE_ID_BUILD) until it is fixed.",
+        ],
+    )
+
+
+def _postSaveVersion(applyResult: dict, baseVersion: int, *, strict: bool = False) -> int:
     """Version the apply task's SavePlaceAsync produced.
 
     apply.luau reports game.PlaceVersion after the save. If the engine updated
     it in-session we get the authoritative number (and a concurrent writer just
     means a gap); if it did not, the value is <= baseVersion and we fall back to
-    the documented baseVersion + 1."""
+    the documented baseVersion + 1.
+
+    That fallback is a guess that only holds while nobody else writes to the
+    place. On a build place shared between repos it can point at *another
+    project's* version — and the byte-identity guard below won't catch it,
+    because it only compares against our own base bytes, and another project's
+    build is not byte-identical to ours. Downloading it would hand this build
+    someone else's game. `strict` refuses to guess instead."""
     reported = applyResult.get("savedVersion")
     if isinstance(reported, bool) or not isinstance(reported, (int, float)):
-        return baseVersion + 1
+        return _unreportedSaveVersion(baseVersion, strict, "the task reported no version")
     reported = int(reported)
     if reported <= baseVersion:
-        return baseVersion + 1
+        return _unreportedSaveVersion(
+            baseVersion,
+            strict,
+            f"the engine did not refresh PlaceVersion in-session (still {reported})",
+        )
     if reported != baseVersion + 1:
         print(
             f"{color.YELLOW}{color.BOLD}WARN{color.END} "
@@ -1071,6 +1101,7 @@ def buildFinalPlace(
     downloadKey: str,
     assetTable: dict,
     placeFilePath: str,
+    strictSaveVersion: bool = False,
 ) -> bytes:
     """Publish-direction core: take the rojo-built Place.rbxl, apply every
     entry inside an execution session, and return the final place bytes
@@ -1078,6 +1109,10 @@ def buildFinalPlace(
 
     Only Saved versions are created on `basePlaceId`; publishing the returned
     bytes is the caller's decision.
+
+    Set `strictSaveVersion` when `basePlaceId` is a build place other projects
+    also build against: it makes an unreported post-save version fatal instead
+    of falling back to the baseVersion + 1 guess. See _postSaveVersion.
     """
     # collect (and line-ending-validate) entry files before any cloud call
     entryFiles = collectEntryFiles(assetTable)
@@ -1140,7 +1175,7 @@ def buildFinalPlace(
     # upload takes a version) or a Studio save can slip in and shift it. Trust
     # the engine's own post-save PlaceVersion when it reports one; the +1
     # assumption is the fallback for engine versions that don't update it.
-    savedVersion = _postSaveVersion(applyResult, baseVersion)
+    savedVersion = _postSaveVersion(applyResult, baseVersion, strict=strictSaveVersion)
     announceStep(f"Downloading applied place (version {savedVersion}) for sidecar patch.")
     finalBytes = downloadPlaceFile(basePlaceId, downloadKey, savedVersion)
     if finalBytes == baseBytes:

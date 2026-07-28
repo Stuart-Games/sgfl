@@ -718,7 +718,9 @@ def _resolveBasePlace(targets: dict, buildPlaceId: Optional[str]) -> tuple[str, 
             ),
             suggestions=[
                 "Create an empty scratch place in the same universe and set PLACE_ID_BUILD to its ID.",
-                "Execution tasks are universe-scoped, so the scratch place must be in UNIVERSE_ID.",
+                "Execution tasks are universe-scoped, so the scratch place must be in UNIVERSE_ID — "
+                f"unless you also set {BUILD_UNIVERSE_KEY}, which puts the build place in a "
+                "universe of its own.",
             ],
         )
 
@@ -730,6 +732,51 @@ def _resolveBasePlace(targets: dict, buildPlaceId: Optional[str]) -> tuple[str, 
         f"Point PLACE_ID_{BUILD_PLACE_NAME.upper()} at a scratch place to avoid this."
     )
     return name, targets[name]
+
+
+def _resolveBuildTarget(
+    targets: Optional[dict] = None,
+    buildPlaceId: Optional[str] = None,
+) -> tuple[str, str, str, bool]:
+    """Where the cloud apply runs: (universeId, placeName, placeId, shared).
+
+    Two shapes.
+
+    With UNIVERSE_ID_BUILD set, the build place lives in a universe of its own
+    and the build needs no publish target at all — which is the point: the
+    build job can run on nothing but org-level constants, and every credential
+    it holds is scoped to a universe containing no game. One such place can
+    serve many repos.
+
+    Without it, the build place is a scratch place inside UNIVERSE_ID, resolved
+    from the publish targets exactly as before.
+
+    `shared` reports the first shape. A build place that many repos can reach
+    is one nothing guarantees you are alone on, so the caller must stop
+    inferring which version the apply produced — see cloud.buildFinalPlace's
+    strictSaveVersion.
+    """
+    buildUniverseId = getBuildUniverseId()
+    if buildUniverseId:
+        placeId = discoverPlaceIds().get(BUILD_PLACE_NAME)
+        if not placeId:
+            raise SGFLError(
+                f"{BUILD_UNIVERSE_KEY} is set but PLACE_ID_{BUILD_PLACE_NAME.upper()} is not.",
+                details=(
+                    "A dedicated build universe is identified by both values; sgfl will not "
+                    "guess which place inside it to apply against."
+                ),
+                suggestions=[
+                    f"Set PLACE_ID_{BUILD_PLACE_NAME.upper()} to a place in universe {buildUniverseId}.",
+                    f"Or unset {BUILD_UNIVERSE_KEY} to build against a scratch place in UNIVERSE_ID.",
+                ],
+            )
+        return buildUniverseId, BUILD_PLACE_NAME, placeId, True
+
+    if targets is None:
+        targets, buildPlaceId = _resolvePublishTargets(None)
+    name, placeId = _resolveBasePlace(targets, buildPlaceId)
+    return getEnvSafe("UNIVERSE_ID"), name, placeId, False
 
 
 def _readArtifact(path: str) -> bytes:
@@ -770,13 +817,14 @@ def buildArtifact(env: str, *, outPath: str, noBuild: bool = False) -> dict:
     loadEnvFile(env)
 
     announceStep("Reading universe configuration.")
-    universeId = getEnvSafe("UNIVERSE_ID")
     publishKey = getEnvSafe("PUBLISH_KEY")
     downloadKey = getEnvSafe("DOWNLOAD_KEY")
     executionKey = cloud.getExecutionKey()
 
-    targets, buildPlaceId = _resolvePublishTargets(None)
-    baseName, basePlaceId = _resolveBasePlace(targets, buildPlaceId)
+    # Deliberately no publish targets here. A build touches the build place and
+    # nothing else, so with UNIVERSE_ID_BUILD set it can run without knowing a
+    # single game place ID — no env file, no place IDs, no way to reach a game.
+    universeId, baseName, basePlaceId, sharedBuild = _resolveBuildTarget()
 
     assetTable = _loadAssetTable()
     _checkForLegacyAssets(assetTable)
@@ -792,7 +840,10 @@ def buildArtifact(env: str, *, outPath: str, noBuild: bool = False) -> dict:
     else:
         _runRojoBuild()
 
-    announceStep(f"Applying assets via the build place '{baseName}' ({basePlaceId}).")
+    announceStep(
+        f"Applying assets via the build place '{baseName}' ({basePlaceId}) "
+        f"in universe {universeId}."
+    )
     try:
         placeBinary = cloud.buildFinalPlace(
             universeId=universeId,
@@ -802,6 +853,7 @@ def buildArtifact(env: str, *, outPath: str, noBuild: bool = False) -> dict:
             downloadKey=downloadKey,
             assetTable=assetTable,
             placeFilePath=PLACE_FILE_PATH,
+            strictSaveVersion=sharedBuild,
         )
     finally:
         # Only clean up a build we made. --no-build means the caller supplied
@@ -826,7 +878,12 @@ def buildArtifact(env: str, *, outPath: str, noBuild: bool = False) -> dict:
         "env": env,
         "universeId": universeId,
         "sgflVersion": sgflVersion,
-        "buildPlace": {"name": baseName, "placeId": basePlaceId},
+        "buildPlace": {
+            "name": baseName,
+            "placeId": basePlaceId,
+            "universeId": universeId,
+            "shared": sharedBuild,
+        },
         "artifact": {"path": outPath, "bytes": len(placeBinary), "sha256": digest},
     }
 
@@ -1136,7 +1193,9 @@ def publishPlaces(
     executionKey = cloud.getExecutionKey()
 
     targets, buildPlaceId = _resolvePublishTargets(placesFilter)
-    baseName, basePlaceId = _resolveBasePlace(targets, buildPlaceId)
+    # The build half may run in a different universe from the upload half; only
+    # the uploads use `universeId`.
+    buildUniverseId, baseName, basePlaceId, sharedBuild = _resolveBuildTarget(targets, buildPlaceId)
 
     assetTable = _loadAssetTable()
     _checkForLegacyAssets(assetTable)
@@ -1160,7 +1219,7 @@ def publishPlaces(
     summaryLines.append(f"{color.CYAN}{color.BOLD}INFO{color.END} versionType: {versionType}")
     summaryLines.append(
         f"{color.CYAN}{color.BOLD}INFO{color.END} apply target (Saved base versions): "
-        f"{baseName} ({basePlaceId})"
+        f"{baseName} ({basePlaceId}) in universe {buildUniverseId}"
     )
     if noBuild:
         summaryLines.append(
@@ -1187,13 +1246,14 @@ def publishPlaces(
             _runRojoBuild()
         try:
             placeBinary = cloud.buildFinalPlace(
-                universeId=universeId,
+                universeId=buildUniverseId,
                 basePlaceId=basePlaceId,
                 executionKey=executionKey,
                 publishKey=publishKey,
                 downloadKey=downloadKey,
                 assetTable=assetTable,
                 placeFilePath=PLACE_FILE_PATH,
+                strictSaveVersion=sharedBuild,
             )
         finally:
             if not noBuild:
@@ -1223,13 +1283,14 @@ def publishPlaces(
 
     try:
         placeBinary = cloud.buildFinalPlace(
-            universeId=universeId,
+            universeId=buildUniverseId,
             basePlaceId=basePlaceId,
             executionKey=executionKey,
             publishKey=publishKey,
             downloadKey=downloadKey,
             assetTable=assetTable,
             placeFilePath=PLACE_FILE_PATH,
+            strictSaveVersion=sharedBuild,
         )
     finally:
         if not noBuild:

@@ -18,6 +18,7 @@ def cleanEnv(monkeypatch):
         if key.startswith("PLACE_ID"):
             monkeypatch.delenv(key, raising=False)
     monkeypatch.delenv("SGFL_CI", raising=False)
+    monkeypatch.delenv(util.BUILD_UNIVERSE_KEY, raising=False)
     return monkeypatch
 
 
@@ -75,6 +76,80 @@ def test_ci_refuses_to_apply_against_a_live_place(cleanEnv):
         operations._resolveBasePlace({"main": "111"}, None)
 
     assert "PLACE_ID_BUILD" in excinfo.value.message
+
+
+# --- dedicated build universe ----------------------------------------------
+
+
+def test_dedicated_build_universe_needs_no_publish_targets(cleanEnv):
+    """The whole point: a build job can run holding nothing that reaches a game."""
+    cleanEnv.setenv(util.BUILD_UNIVERSE_KEY, "7000")
+    cleanEnv.setenv("PLACE_ID_BUILD", "999")
+
+    universeId, name, placeId, shared = operations._resolveBuildTarget()
+
+    assert (universeId, name, placeId, shared) == ("7000", util.BUILD_PLACE_NAME, "999", True)
+
+
+def test_dedicated_build_universe_requires_its_place(cleanEnv):
+    cleanEnv.setenv(util.BUILD_UNIVERSE_KEY, "7000")
+    cleanEnv.setenv("PLACE_ID_MAIN", "111")
+
+    with pytest.raises(SGFLError) as excinfo:
+        operations._resolveBuildTarget()
+
+    assert "PLACE_ID_BUILD" in excinfo.value.message
+
+
+def test_dedicated_build_universe_ignores_publish_targets(cleanEnv):
+    """A game's own universe must not leak into the build half."""
+    cleanEnv.setenv(util.BUILD_UNIVERSE_KEY, "7000")
+    cleanEnv.setenv("PLACE_ID_BUILD", "999")
+    cleanEnv.setenv("UNIVERSE_ID", "42")
+
+    universeId, _name, _placeId, _shared = operations._resolveBuildTarget({"main": "111"}, None)
+
+    assert universeId == "7000"
+
+
+def test_without_the_build_universe_nothing_changes(cleanEnv):
+    cleanEnv.setenv("UNIVERSE_ID", "42")
+    cleanEnv.setenv("PLACE_ID_MAIN", "111")
+    cleanEnv.setenv("PLACE_ID_BUILD", "999")
+
+    universeId, name, placeId, shared = operations._resolveBuildTarget()
+
+    assert (universeId, name, placeId, shared) == ("42", util.BUILD_PLACE_NAME, "999", False)
+
+
+# --- post-save version -----------------------------------------------------
+
+
+def test_post_save_version_trusts_the_engine():
+    assert cloud._postSaveVersion({"savedVersion": 12}, 8) == 12
+
+
+def test_post_save_version_guesses_when_unreported():
+    assert cloud._postSaveVersion({}, 8) == 9
+    assert cloud._postSaveVersion({"savedVersion": 8}, 8) == 9
+
+
+@pytest.mark.parametrize("applyResult", [{}, {"savedVersion": 8}, {"savedVersion": True}])
+def test_shared_build_place_refuses_to_guess(applyResult):
+    """base + 1 on a shared build place can point at another project's version,
+    and the byte-identity guard only compares against our own base bytes — so a
+    wrong guess would silently hand this build someone else's game."""
+    with pytest.raises(SGFLError) as excinfo:
+        cloud._postSaveVersion(applyResult, 8, strict=True)
+
+    assert "did not report" in excinfo.value.message
+
+
+def test_shared_build_place_accepts_a_reported_version(capsys):
+    """A gap is fine when the engine reported it — that number is authoritative
+    regardless of who else wrote to the place."""
+    assert cloud._postSaveVersion({"savedVersion": 14}, 8, strict=True) == 14
+    assert "WARN" in capsys.readouterr().out
 
 
 # --- authorization ---------------------------------------------------------
@@ -291,6 +366,34 @@ def test_no_build_keeps_the_place_file_it_was_given(stubbedBuild, isolatedCwd):
     operations.buildArtifact("prod", outPath="dist/place.rbxl", noBuild=True)
 
     assert supplied.exists()
+
+
+def test_build_uses_the_dedicated_universe_and_asks_for_strictness(stubbedBuild, cleanEnv):
+    cleanEnv.setenv(util.BUILD_UNIVERSE_KEY, "7000")
+
+    operations.buildArtifact("prod", outPath="dist/place.rbxl")
+
+    assert stubbedBuild["universeId"] == "7000"
+    assert stubbedBuild["basePlaceId"] == "999"
+    assert stubbedBuild["strictSaveVersion"] is True
+
+
+def test_build_in_its_own_universe_needs_no_env_file(monkeypatch, isolatedCwd, stubbedBuild):
+    """No .env.<env>, no UNIVERSE_ID, no game place IDs — just the org constants."""
+    (isolatedCwd / ".env.prod").unlink()
+    monkeypatch.setenv("SGFL_CI", "1")
+    monkeypatch.setenv(util.BUILD_UNIVERSE_KEY, "7000")
+    monkeypatch.setenv("PLACE_ID_BUILD", "999")
+    monkeypatch.delenv("UNIVERSE_ID", raising=False)
+
+    result = operations.buildArtifact("prod", outPath="dist/place.rbxl")
+
+    assert result["buildPlace"] == {
+        "name": util.BUILD_PLACE_NAME,
+        "placeId": "999",
+        "universeId": "7000",
+        "shared": True,
+    }
 
 
 def test_no_build_requires_the_place_file_to_exist(stubbedBuild):
