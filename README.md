@@ -121,7 +121,7 @@ The delegating exclude must be a **literal name glob** (`"Shared"`, `"Sh*"`, ...
 
 run the command `pipx install git+https://github.com/Stuart-Games/sgfl.git`.
 
-That tracks `main`. CI and anything that needs a reproducible build should pin to a release tag instead — `pipx install git+https://github.com/Stuart-Games/sgfl.git@v2.5.0`. Releases are cut automatically from the `version` field in `pyproject.toml` whenever it changes on `main`, so every version that exists has a tag.
+That tracks `main`. CI and anything that needs a reproducible build should pin to a release tag instead — `pipx install git+https://github.com/Stuart-Games/sgfl.git@v2.6.0`. Releases are cut automatically from the `version` field in `pyproject.toml` whenever it changes on `main`, so every version that exists has a tag.
 
 ## Upgrading
 
@@ -187,9 +187,11 @@ There is no rollback command. The build artifact is the rollback mechanism: keep
 
 **Key permissions stop at the experience.** Scopes are granted per experience (universe), never per place, so a key that can build can also publish to every live place in that experience. What you *can* split is capability: the build job needs Luau Execution + place publishing + asset delivery, while the upload job needs only place publishing, so issue the upload key with strictly less.
 
-**Define the secrets once, at the org.** Organization → Settings → Secrets and variables → Actions → New organization secret, scoped to selected repositories. Every game repo then inherits `SGFL_PUBLISH_KEY` / `SGFL_DOWNLOAD_KEY` / `SGFL_EXECUTION_KEY` with nothing to copy. (Org secrets for private repos need a Team plan or higher.)
+**Give the build its own universe.** One empty place, in an experience containing no game, pointed at by `UNIVERSE_ID_BUILD` + `PLACE_ID_BUILD`. Since scopes can't be narrowed below an experience, this is the only way to make a build credential that genuinely cannot reach a live place: put nothing reachable in its experience. It also makes the build the same everywhere — a build resolves no publish targets, so those two ids are the *only* project config a build job needs, and one build place serves every repo.
 
-**Maintain the workflow once.** The pipeline lives in `Stuart-Games/.github` as `.github/workflows/sgfl-publish.yml` — a `workflow_call` workflow that runs `sgfl build`, uploads the artifact, then runs `sgfl upload` in an environment-gated job. Tag it `v1`. Each game repo then carries only a caller:
+**Define it all once, at the org.** Organization → Settings → Secrets and variables → Actions. The three keys go in as **secrets** (`SGFL_PUBLISH_KEY` / `SGFL_DOWNLOAD_KEY` / `SGFL_EXECUTION_KEY`); the two build ids go in as **variables** (`UNIVERSE_ID_BUILD` / `PLACE_ID_BUILD`) since they aren't secret. Scope both sets to the game repos, not just the workflow repo — in a reusable workflow `vars` and `secrets` resolve against the repo that *triggered* the run. A game repo then needs nothing of its own to build. (Org secrets for private repos need a Team plan or higher.)
+
+**Maintain the workflow once.** The pipeline lives in a dedicated org repo (for Stuart Games, `Stuart-Games/cicd`) as a `workflow_call` workflow that runs `sgfl build`, uploads the artifact, then runs `sgfl upload` in an environment-gated job. Tag it `v1`. Each game repo then carries only a caller:
 
 ```yaml
 name: sgfl publish
@@ -204,23 +206,20 @@ on:
         default: main
 jobs:
   publish:
-    uses: Stuart-Games/.github/.github/workflows/sgfl-publish.yml@v1
+    uses: Stuart-Games/cicd/.github/workflows/sgfl-publish.yml@v1
     with:
       env: ${{ inputs.env }}
       places: ${{ inputs.places }}
-      sgflRef: v2.5.0
     secrets: inherit
 ```
 
 Approvals stay per repo — GitHub environments can't be defined org-wide — so each game still needs its `production` environment with required reviewers under Settings → Environments.
 
-**Pin `sgflRef` per repo.** Floating on `main` means one sgfl change can break every game at once. Pinning lets you roll the fleet forward one repo at a time.
+**Keep the sgfl version in the reusable workflow, not the caller.** A per-repo `sgflRef` means upgrading the fleet is one PR per game, which is how repos quietly fall years behind. Put the version in the workflow's input default instead: one bump reaches everything, and the `v1` tag on the workflow repo is the lever if you need to stage a rollout. A workflow that only builds can float on `main` outright — it ships nothing to players, so a bad sgfl change surfaces as a red smoke run, which is the early warning you want.
 
-**Either give each universe its own scratch build place, or give the org one.** Execution tasks are universe-scoped, so by default `PLACE_ID_BUILD` must live in that game's `UNIVERSE_ID` — one empty place per universe, declared in that repo's `.env.<env>`.
+**Nothing serializes a shared build place, so sgfl fails loud instead.** Many repos building against one place means nothing guarantees the version your apply produced is the next one — and GitHub can't fix that upstream, because `concurrency` groups are scoped to the triggering repository and a group defined in a reusable workflow won't span callers. So with `UNIVERSE_ID_BUILD` set, sgfl stops inferring: if the engine doesn't report the version it saved, the build fails rather than risk downloading a version another repo's build made. Those failures are re-runnable; publishing another game's place file would not be.
 
-The alternative is a single build universe shared by every repo, set with `UNIVERSE_ID_BUILD` + `PLACE_ID_BUILD`. It is worth doing: the build keys then scope to a universe containing no game, so build credentials genuinely cannot reach a live place, and both ids become org constants that can live in the reusable workflow instead of every repo's env file. The cost is that many repos build against one place concurrently, so sgfl stops inferring which version its apply produced — if the engine doesn't report it, the build fails loudly rather than risk downloading another project's place file. Those failures are re-runnable; a wrong guess would not be recoverable.
-
-GitHub cannot serialize this for you, incidentally: `concurrency` groups are scoped per repository, so a group defined in a reusable workflow won't serialize runs from different callers. That's the reason the guard lives in sgfl.
+This only applies to `build`/`publish`. `sgfl start` applies against `PLACE_ID` — your own dev place — and is unaffected either way.
 
 **The rate limit is per key owner, not per key.** Task creation is capped at 5/minute for whoever owns the key, so every game sharing the group's key draws on one budget, and issuing more keys under the same group buys nothing. One `sgfl build` is one task, so this only bites when several games build at once; sgfl backs off and retries on 429 rather than failing. The per-repo concurrency group serializes a single repo, not the org.
 
