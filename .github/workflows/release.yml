@@ -1,0 +1,82 @@
+# Tags and releases sgfl from the version already in pyproject.toml.
+#
+# pyproject.toml is the single source of truth — checkForUpdates() reads that
+# same field off origin/main to tell users an upgrade exists, so deriving the
+# tag from it keeps the two from ever disagreeing. Bumping `version` in a PR is
+# the whole release process; merging it produces the tag.
+#
+# Idempotent: a push to main whose version already has a release does nothing,
+# so this is safe on every merge, not just release ones.
+
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths: ["pyproject.toml"]
+  workflow_dispatch: {} # re-run if a release step failed after a merge
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write # create tags and releases
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # release notes are generated from history
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Read version from pyproject.toml
+        id: version
+        run: |
+          VERSION=$(python -c "import tomllib;print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Version in pyproject.toml: $VERSION"
+
+      - name: Skip if this version is already released
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "v${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "v${{ steps.version.outputs.version }} already released — nothing to do."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Game repos install straight from this tag, so a broken release breaks
+      # every pipeline pinned to it. Gate on the same suite tests.yml runs.
+      - name: Test before releasing
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          pip install -e ".[test]"
+          pytest -q
+
+      - name: Verify the package installs clean from a fresh checkout
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          python -m venv /tmp/verify
+          /tmp/verify/bin/pip install --quiet .
+          /tmp/verify/bin/sgfl --help > /dev/null
+          echo "sgfl --help ran from a clean install"
+
+      - name: Create the release
+        if: steps.check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v${{ steps.version.outputs.version }}" \
+            --target "$GITHUB_SHA" \
+            --title "v${{ steps.version.outputs.version }}" \
+            --generate-notes
+          echo "Released v${{ steps.version.outputs.version }}"
