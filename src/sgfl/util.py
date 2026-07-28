@@ -14,17 +14,32 @@ from importlib.metadata import version as _pkgVersion, PackageNotFoundError
 from typing import Optional
 
 
+def _colorEnabled() -> bool:
+    """ANSI is for humans at a terminal. CI logs (and piped output) get plain
+    text so the escape codes don't end up in build logs and step summaries."""
+    if os.environ.get("NO_COLOR"):
+        return False
+    if os.environ.get("FORCE_COLOR"):
+        return True
+    try:
+        return sys.stdout.isatty()
+    except Exception:
+        return False
+
+
 class color:
-    PURPLE = "\033[95m"
-    CYAN = "\033[96m"
-    DARKCYAN = "\033[36m"
-    BLUE = "\033[94m"
-    GREEN = "\033[92m"
-    YELLOW = "\033[93m"
-    RED = "\033[91m"
-    BOLD = "\033[1m"
-    UNDERLINE = "\033[4m"
-    END = "\033[0m"
+    _ON = _colorEnabled()
+
+    PURPLE = "\033[95m" if _ON else ""
+    CYAN = "\033[96m" if _ON else ""
+    DARKCYAN = "\033[36m" if _ON else ""
+    BLUE = "\033[94m" if _ON else ""
+    GREEN = "\033[92m" if _ON else ""
+    YELLOW = "\033[93m" if _ON else ""
+    RED = "\033[91m" if _ON else ""
+    BOLD = "\033[1m" if _ON else ""
+    UNDERLINE = "\033[4m" if _ON else ""
+    END = "\033[0m" if _ON else ""
 
 
 class SGFLError(Exception):
@@ -37,6 +52,7 @@ class SGFLError(Exception):
         stdout: Optional[str] = None,
         stderr: Optional[str] = None,
         diagnostics: Optional[dict[str, list[str]]] = None,
+        record: Optional[dict] = None,
     ):
         super().__init__(message)
         self.message = message
@@ -46,12 +62,28 @@ class SGFLError(Exception):
         self.stdout = stdout
         self.stderr = stderr
         self.diagnostics = diagnostics or {}
+        # Machine-readable result attached by partially-successful operations
+        # (e.g. 3 of 5 places published) so --json still reports what landed.
+        self.record = record
 
 
 API_ENV_KEYS = ["PUBLISH_KEY", "DOWNLOAD_KEY", "EXECUTION_KEY"]
 ID_ENV_KEYS = ["PLACE_ID", "UNIVERSE_ID", "USER_ID"]
 
+# Keys the process was started with, captured before any dotenv load. These
+# outrank .env.<env> so a CI runner's secrets can't be clobbered by committed
+# ID files — see loadEnvFile.
+_PROCESS_ENV_KEYS = frozenset(os.environ.keys())
+
 _envSuffix: Optional[str] = None
+
+
+def isCiMode() -> bool:
+    """True when the caller has explicitly declared a non-interactive automated
+    run by setting SGFL_CI. Deliberately does NOT key off the generic CI
+    variable: publishing is destructive, so the opt-in has to be sgfl-specific
+    rather than something a local test runner can switch on by accident."""
+    return bool((os.environ.get("SGFL_CI") or "").strip())
 
 
 def setEnvSuffix(suffix: str):
@@ -77,7 +109,7 @@ def _toolDiagnosticsForTask(taskName: Optional[str], pullEnabled: bool) -> list[
         requiredTools.extend(["rojo", "code"])
         if pullEnabled:
             requiredTools.append("git")
-    elif taskName == "publish":
+    elif taskName in ("publish", "build"):
         requiredTools.append("rojo")
     elif taskName == "init":
         requiredTools.extend(["rokit"])
@@ -554,20 +586,59 @@ def saveCredentials(values: dict) -> str:
 
 _PLACE_ID_PATTERN = re.compile(r"^PLACE_ID_(.+)$")
 
+# Reserved place name. PLACE_ID_BUILD designates a scratch place used as the
+# apply target for the cloud pipeline; it is never a publish destination.
+BUILD_PLACE_NAME = "build"
 
-def loadEnvFile(env: str) -> str:
+
+def loadEnvFile(env: str) -> Optional[str]:
+    """Load .env.<env> over the already-merged credentials.
+
+    Precedence is real process environment > .env.<env> > ~/.sgfl/credentials.
+    dotenv has no notion of "where did this value come from", so the file is
+    loaded with override=True and every key the process was actually started
+    with is then put back (loudly). Without that, a CI job supplying
+    PLACE_ID_LOBBY as a secret would silently publish to whatever ID happened
+    to be committed in the env file.
+
+    In SGFL_CI mode a missing env file is not fatal — automated runs are
+    expected to supply everything through the environment.
+    """
     envFileName = f".env.{env}"
     envPath = getFileURI(envFileName)
     if not os.path.exists(envPath):
+        if isCiMode():
+            print(
+                f"{color.YELLOW}{color.BOLD}WARN{color.END} "
+                f"{envFileName} not found — SGFL_CI is set, so continuing with the "
+                f"process environment alone."
+            )
+            return None
         raise SGFLError(
             f"Missing environment file: {envFileName}",
             details=f"Expected to find {envPath}.",
             suggestions=[
                 f"Create {envFileName} in the project root with UNIVERSE_ID, PUBLISH_KEY, and one or more PLACE_ID_<NAME> entries.",
                 "Run sgfl publish from the directory containing your env files.",
+                "In automated runs, set SGFL_CI=1 and supply the values as environment variables instead.",
             ],
         )
+
+    inherited = {key: os.environ[key] for key in _PROCESS_ENV_KEYS if key in os.environ}
     dotenv.load_dotenv(envPath, override=True)
+
+    shadowed = []
+    for key, value in inherited.items():
+        if os.environ.get(key) != value:
+            os.environ[key] = value
+            shadowed.append(key)
+    if shadowed:
+        print(
+            f"{color.YELLOW}{color.BOLD}WARN{color.END} "
+            f"{envFileName} set {', '.join(sorted(shadowed))}, but the value(s) already in "
+            f"the environment take precedence and were kept."
+        )
+
     return envPath
 
 

@@ -1,4 +1,5 @@
 import getpass
+import hashlib
 import sys
 import requests
 import typer
@@ -7,9 +8,13 @@ from urllib.parse import urlparse
 from typing import Optional
 from sys import platform
 from .util import *
+from .util import _getInstalledVersion  # private: not covered by the star import
 from . import cloud
 
 REQUEST_TIMEOUT_SECONDS = 30
+# Place uploads are multi-megabyte bodies; the 30s API timeout is not enough
+# for them on a slow uplink.
+UPLOAD_TIMEOUT_SECONDS = 300
 
 
 def _responseReason(res: requests.Response) -> str:
@@ -638,77 +643,42 @@ def _formatPlaceFileSummary(path: str) -> str:
     return f"Place.rbxl: {sizeMb:.2f} MB, modified {mtime}"
 
 
-def _publishPlaceFile(
-    *,
-    name: str,
-    placeId: str,
-    universeId: str,
-    publishKey: str,
-    placeBinary: bytes,
-    versionType: str,
-) -> Optional[dict]:
-    url = (
-        f"https://apis.roblox.com/universes/v1/{universeId}"
-        f"/places/{placeId}/versions?versionType={versionType}"
-    )
-    headers = {"x-api-key": publishKey, "Content-Type": "application/octet-stream"}
+# ---------------------------------------------------------------------------
+# Build / upload split
+#
+# The cloud apply is slow (minutes), rate-limited (5 task creations/min per key
+# owner) and writes Saved versions to a real place. Doing it once per publish
+# target — or re-doing it because upload #3 of 5 got a 500 — is what made the
+# old single-shot publish flow unusable unattended. `sgfl build` runs it once
+# and emits bytes; `sgfl upload` promotes those exact bytes anywhere, cheaply
+# and repeatably. `sgfl publish` is now just the two of them back to back.
+# ---------------------------------------------------------------------------
 
-    announceStep(f"Uploading to {name} ({placeId})...")
-    try:
-        res = requests.post(
-            url, headers=headers, data=placeBinary, timeout=REQUEST_TIMEOUT_SECONDS
-        )
-    except requests.RequestException as exc:
-        return {
-            "name": name,
-            "placeId": placeId,
-            "reason": f"network error: {exc}",
-            "diagnostics": _httpDiagnostics(
-                method="POST",
-                url=url,
-                apiKeyName="PUBLISH_KEY",
-                apiKey=publishKey,
-                error=exc,
-            ),
-        }
-
-    if res.status_code != 200:
-        return {
-            "name": name,
-            "placeId": placeId,
-            "reason": f"HTTP {res.status_code}: {_responseReason(res)}",
-            "statusCode": res.status_code,
-            "diagnostics": _httpDiagnostics(
-                method="POST",
-                url=url,
-                apiKeyName="PUBLISH_KEY",
-                apiKey=publishKey,
-                response=res,
-            ),
-        }
-
-    print(f"{color.GREEN}{color.BOLD}OK{color.END}   {name} published successfully.")
-    return None
+PLACE_FILE_MAGIC = b"<roblox!"
 
 
-def publishPlaces(
-    env: str,
-    *,
-    dryRun: bool = False,
-    noBuild: bool = False,
-    placesFilter: Optional[list[str]] = None,
-    versionType: str = "Published",
-):
-    announceStep(f"Loading environment file .env.{env}.")
-    loadEnvFile(env)
-
-    announceStep("Reading universe configuration.")
-    universeId = getEnvSafe("UNIVERSE_ID")
-    publishKey = getEnvSafe("PUBLISH_KEY")
+def _resolvePublishTargets(placesFilter: Optional[list[str]]) -> tuple[dict, Optional[str]]:
+    """Discovered places split into publish targets and the reserved build place."""
     places = discoverPlaceIds()
+    buildPlaceId = places.pop(BUILD_PLACE_NAME, None)
+
+    if not places:
+        raise SGFLError(
+            "No publish targets found in env file.",
+            details=(
+                f"PLACE_ID_{BUILD_PLACE_NAME.upper()} is reserved as the pipeline's scratch "
+                "apply target and is never published to."
+            ),
+            suggestions=["Add PLACE_ID or PLACE_ID_<NAME> entries for the places you publish to."],
+        )
 
     if placesFilter:
         normalized = [p.strip().lower() for p in placesFilter if p.strip()]
+        if BUILD_PLACE_NAME in normalized:
+            raise SGFLError(
+                f"'{BUILD_PLACE_NAME}' is a reserved place name and cannot be a publish target.",
+                details=f"PLACE_ID_{BUILD_PLACE_NAME.upper()} designates the scratch place the cloud apply runs against.",
+            )
         unknown = [p for p in normalized if p not in places]
         if unknown:
             raise SGFLError(
@@ -724,6 +694,450 @@ def publishPlaces(
             )
         places = {name: places[name] for name in normalized}
 
+    return places, buildPlaceId
+
+
+def _resolveBasePlace(targets: dict, buildPlaceId: Optional[str]) -> tuple[str, str]:
+    """Which place the apply task runs against.
+
+    buildFinalPlace uploads the asset-less rojo build as a Saved version before
+    the apply task runs, so whichever place this returns has an asset-less
+    skeleton as its latest version for the duration of the task — and keeps it
+    if the task dies. That must not be a live place in an automated run.
+    """
+    if buildPlaceId:
+        return BUILD_PLACE_NAME, buildPlaceId
+
+    if isCiMode():
+        raise SGFLError(
+            f"PLACE_ID_{BUILD_PLACE_NAME.upper()} is required when SGFL_CI is set.",
+            details=(
+                "The cloud apply uploads an asset-less Saved base version to its target place "
+                "before applying entry files. If the task fails, that skeleton stays the place's "
+                "latest version — unacceptable on a live place in an unattended run."
+            ),
+            suggestions=[
+                "Create an empty scratch place in the same universe and set PLACE_ID_BUILD to its ID.",
+                "Execution tasks are universe-scoped, so the scratch place must be in UNIVERSE_ID.",
+            ],
+        )
+
+    name = "main" if "main" in targets else sorted(targets.keys())[0]
+    print(
+        f"{color.YELLOW}{color.BOLD}WARN{color.END} "
+        f"No PLACE_ID_{BUILD_PLACE_NAME.upper()} declared — the apply task will run against "
+        f"'{name}' ({targets[name]}), leaving an asset-less Saved version on it if it fails. "
+        f"Point PLACE_ID_{BUILD_PLACE_NAME.upper()} at a scratch place to avoid this."
+    )
+    return name, targets[name]
+
+
+def _readArtifact(path: str) -> bytes:
+    if not os.path.exists(path):
+        raise SGFLError(
+            f"Place artifact not found: {path}",
+            suggestions=[
+                "Run sgfl build <env> --out <path> to produce one.",
+                "In CI, confirm the build job's artifact was downloaded before this step.",
+            ],
+        )
+    with open(path, "rb") as f:
+        data = f.read()
+    if not data.startswith(PLACE_FILE_MAGIC):
+        raise SGFLError(
+            f"{path} is not a binary .rbxl place file.",
+            details=f"Expected it to start with {PLACE_FILE_MAGIC!r}; got {data[:16]!r}.",
+            suggestions=[
+                "Pass the file produced by sgfl build, not a rojo output or an .rbxlx.",
+                "A truncated file usually means the CI artifact upload/download was incomplete.",
+            ],
+        )
+    return data
+
+
+def _artifactDigest(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def buildArtifact(env: str, *, outPath: str, noBuild: bool = False) -> dict:
+    """Produce final, sidecar-patched place bytes without publishing anything.
+
+    This is the whole expensive half of the pipeline (rojo -> Saved base ->
+    cloud apply -> download -> sidecar patch), and it touches only the scratch
+    build place. Safe to run on every PR as a validation gate.
+    """
+    announceStep(f"Loading environment file .env.{env}.")
+    loadEnvFile(env)
+
+    announceStep("Reading universe configuration.")
+    universeId = getEnvSafe("UNIVERSE_ID")
+    publishKey = getEnvSafe("PUBLISH_KEY")
+    downloadKey = getEnvSafe("DOWNLOAD_KEY")
+    executionKey = cloud.getExecutionKey()
+
+    targets, buildPlaceId = _resolvePublishTargets(None)
+    baseName, basePlaceId = _resolveBasePlace(targets, buildPlaceId)
+
+    assetTable = _loadAssetTable()
+    _checkForLegacyAssets(assetTable)
+
+    if noBuild:
+        if not os.path.exists(PLACE_FILE_PATH):
+            raise SGFLError(
+                "--no-build was passed but Place.rbxl does not exist.",
+                details=f"Expected file at: {PLACE_FILE_PATH}.",
+                suggestions=["Run without --no-build to compile it via rojo first."],
+            )
+        announceStep(f"Reusing existing build — {_formatPlaceFileSummary(PLACE_FILE_PATH)}.")
+    else:
+        _runRojoBuild()
+
+    announceStep(f"Applying assets via the build place '{baseName}' ({basePlaceId}).")
+    try:
+        placeBinary = cloud.buildFinalPlace(
+            universeId=universeId,
+            basePlaceId=basePlaceId,
+            executionKey=executionKey,
+            publishKey=publishKey,
+            downloadKey=downloadKey,
+            assetTable=assetTable,
+            placeFilePath=PLACE_FILE_PATH,
+        )
+    finally:
+        # Only clean up a build we made. --no-build means the caller supplied
+        # Place.rbxl and expects it to still be there afterwards.
+        if not noBuild:
+            deleteFile(PLACE_FILE_PATH)
+
+    outDir = os.path.dirname(os.path.abspath(outPath))
+    if outDir:
+        os.makedirs(outDir, exist_ok=True)
+    with open(outPath, "wb") as f:
+        f.write(placeBinary)
+
+    digest = _artifactDigest(placeBinary)
+    sizeMb = len(placeBinary) / (1024 * 1024)
+    sgflVersion = _getInstalledVersion()
+    print(
+        f"{color.GREEN}{color.BOLD}SUCCESS{color.END} Wrote {outPath} "
+        f"({sizeMb:.2f} MB, sha256 {digest[:16]}..., sgfl {sgflVersion or 'unknown'})."
+    )
+    return {
+        "env": env,
+        "universeId": universeId,
+        "sgflVersion": sgflVersion,
+        "buildPlace": {"name": baseName, "placeId": basePlaceId},
+        "artifact": {"path": outPath, "bytes": len(placeBinary), "sha256": digest},
+    }
+
+
+def _confirmTargets(env: str, summaryLines: list[str], targets: dict, expectPlaces: Optional[list[str]]) -> None:
+    """Authorize an upload.
+
+    Interactively that is the typed phrase plus the arrow-key toggle, unchanged.
+    Under SGFL_CI there is no human, so authority comes from --expect-places:
+    the caller states the exact target set up front and the upload aborts if
+    what the env file resolved to differs. A place added to the env file cannot
+    then be published to without someone editing the workflow.
+    """
+    actual = set(targets.keys())
+
+    if expectPlaces is not None:
+        expected = {p.strip().lower() for p in expectPlaces if p.strip()}
+        if expected != actual:
+            missing = sorted(expected - actual)
+            extra = sorted(actual - expected)
+            details = []
+            if missing:
+                details.append(f"expected but not resolved: {', '.join(missing)}")
+            if extra:
+                details.append(f"resolved but not expected: {', '.join(extra)}")
+            raise SGFLError(
+                "--expect-places does not match the resolved publish targets.",
+                details="; ".join(details),
+                suggestions=[
+                    f"Resolved targets: {', '.join(sorted(actual))}.",
+                    "Update --expect-places if the change is intentional, or fix the env file.",
+                ],
+            )
+
+    if isCiMode():
+        if expectPlaces is None:
+            raise SGFLError(
+                "--expect-places is required when SGFL_CI is set.",
+                details="Unattended uploads must state their targets explicitly instead of trusting whatever the env file resolves to.",
+                suggestions=[
+                    f"Pass --expect-places {','.join(sorted(actual))}.",
+                    "Unset SGFL_CI to use the interactive confirmation instead.",
+                ],
+            )
+        print()
+        for line in summaryLines:
+            print(line)
+        announceStep(f"SGFL_CI set and --expect-places matched ({', '.join(sorted(actual))}) — proceeding.")
+        return
+
+    confirmPublish(env, summaryLines)
+    toggleMessage = (
+        f"{color.RED}{color.BOLD}PLEASE MOVE TO YES TO CONFIRM{color.END}"
+        f"  (←/→ to choose, Enter to commit)"
+    )
+    if not confirmToggle(toggleMessage, defaultYes=False):
+        announceStep("Aborted by user.")
+        raise typer.Exit(code=0)
+
+
+def _publishPlaceFile(
+    *,
+    name: str,
+    placeId: str,
+    universeId: str,
+    publishKey: str,
+    placeBinary: bytes,
+    versionType: str,
+) -> dict:
+    """Upload the finished bytes to one place. Never raises: a failure here must
+    not stop the remaining targets, so the caller gets a result record and
+    decides. 429 is retried (nothing was created); other failures are not,
+    because a 5xx may still have produced a version."""
+    url = (
+        f"https://apis.roblox.com/universes/v1/{universeId}"
+        f"/places/{placeId}/versions?versionType={versionType}"
+    )
+    headers = {"x-api-key": publishKey, "Content-Type": "application/octet-stream"}
+
+    announceStep(f"Uploading to {name} ({placeId})...")
+    attempt = 0
+    while True:
+        try:
+            res = requests.post(
+                url, headers=headers, data=placeBinary, timeout=UPLOAD_TIMEOUT_SECONDS
+            )
+        except requests.RequestException as exc:
+            return {
+                "name": name,
+                "placeId": placeId,
+                "ok": False,
+                "reason": f"network error: {exc}",
+                "diagnostics": _httpDiagnostics(
+                    method="POST",
+                    url=url,
+                    apiKeyName="PUBLISH_KEY",
+                    apiKey=publishKey,
+                    error=exc,
+                ),
+            }
+
+        if res.status_code == 429 and attempt < cloud.MAX_RETRIES:
+            delay = cloud._retryDelay(res, attempt)
+            print(
+                f"{color.YELLOW}{color.BOLD}RETRY{color.END} {name}: rate limited — "
+                f"retrying in {delay:.0f}s ({attempt + 1}/{cloud.MAX_RETRIES})."
+            )
+            time.sleep(delay)
+            attempt += 1
+            continue
+        break
+
+    if res.status_code != 200:
+        return {
+            "name": name,
+            "placeId": placeId,
+            "ok": False,
+            "reason": f"HTTP {res.status_code}: {_responseReason(res)}",
+            "statusCode": res.status_code,
+            "diagnostics": _httpDiagnostics(
+                method="POST",
+                url=url,
+                apiKeyName="PUBLISH_KEY",
+                apiKey=publishKey,
+                response=res,
+            ),
+        }
+
+    try:
+        versionNumber = res.json().get("versionNumber")
+    except ValueError:
+        versionNumber = None
+
+    versionText = f" as version {versionNumber}" if versionNumber is not None else ""
+    print(f"{color.GREEN}{color.BOLD}OK{color.END}   {name} published successfully{versionText}.")
+    return {"name": name, "placeId": placeId, "ok": True, "versionNumber": versionNumber}
+
+
+def _uploadToTargets(
+    *,
+    env: str,
+    universeId: str,
+    publishKey: str,
+    targets: dict,
+    placeBinary: bytes,
+    versionType: str,
+) -> dict:
+    """Upload the same bytes to every target, then report. Returns the result
+    record; raises only after every target has been attempted."""
+    results = [
+        _publishPlaceFile(
+            name=name,
+            placeId=targets[name],
+            universeId=universeId,
+            publishKey=publishKey,
+            placeBinary=placeBinary,
+            versionType=versionType,
+        )
+        for name in sorted(targets.keys())
+    ]
+    failures = [r for r in results if not r["ok"]]
+
+    print(f"\n{color.BOLD}Publish summary{color.END} (env={env}, universe={universeId}):")
+    nameWidth = max(len(name) for name in targets.keys())
+    for result in results:
+        marker = (
+            f"{color.GREEN}{color.BOLD} OK {color.END}"
+            if result["ok"]
+            else f"{color.RED}{color.BOLD}FAIL{color.END}"
+        )
+        line = f"  {marker}  {result['name'].ljust(nameWidth)}  ->  {result['placeId']}"
+        if result["ok"]:
+            if result.get("versionNumber") is not None:
+                line += f"   version {result['versionNumber']}"
+        else:
+            line += f"   {result['reason']}"
+        print(line)
+
+    record = {
+        "env": env,
+        "universeId": universeId,
+        "versionType": versionType,
+        # sgfl is the serializer, so which version built the bytes is part of
+        # what reproduces them. Pin sgflRef in CI and this tells you to what.
+        "sgflVersion": _getInstalledVersion(),
+        "artifactSha256": _artifactDigest(placeBinary),
+        "artifactBytes": len(placeBinary),
+        "places": [
+            {k: v for k, v in r.items() if k != "diagnostics"} for r in results
+        ],
+        "ok": not failures,
+    }
+
+    if failures:
+        suggestions = [
+            "Re-run sgfl upload with the same artifact — successful places are simply republished with identical bytes.",
+            "Inspect each failed place's HTTP diagnostics with --detailed.",
+            "Confirm UNIVERSE_ID and every PLACE_ID_<NAME> point to the right place.",
+        ]
+        if any(f.get("statusCode") in (401, 403) for f in failures):
+            suggestions.append(
+                "PUBLISH_KEY may lack permissions on one or more places — check scopes and allowed-IP settings in the Creator Dashboard."
+            )
+        raise SGFLError(
+            f"{len(failures)} of {len(targets)} place(s) failed to publish.",
+            details="; ".join(f"{f['name']}: {f['reason']}" for f in failures),
+            suggestions=suggestions,
+            diagnostics={f"HTTP diagnostics ({f['name']})": f["diagnostics"] for f in failures},
+            record=record,
+        )
+
+    print(
+        f"\n{color.GREEN}{color.BOLD}SUCCESS{color.END} Published to {len(targets)} place(s) in universe {universeId}."
+    )
+    return record
+
+
+def _writeJsonReport(path: Optional[str], record: dict) -> None:
+    if not path:
+        return
+    directory = os.path.dirname(os.path.abspath(path))
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(record, f, indent=2, sort_keys=True)
+    announceStep(f"Wrote machine-readable report to {path}.")
+
+
+def uploadArtifact(
+    env: str,
+    *,
+    artifactPath: str,
+    placesFilter: Optional[list[str]] = None,
+    versionType: str = "Published",
+    expectPlaces: Optional[list[str]] = None,
+    jsonPath: Optional[str] = None,
+):
+    """Promote already-built place bytes to every declared place.
+
+    No rojo, no execution task, no rate limit — just uploads, so a partial
+    failure can be retried immediately with the identical artifact.
+    """
+    announceStep(f"Loading environment file .env.{env}.")
+    loadEnvFile(env)
+
+    announceStep("Reading universe configuration.")
+    universeId = getEnvSafe("UNIVERSE_ID")
+    publishKey = getEnvSafe("PUBLISH_KEY")
+    targets, _buildPlaceId = _resolvePublishTargets(placesFilter)
+
+    placeBinary = _readArtifact(artifactPath)
+    digest = _artifactDigest(placeBinary)
+
+    summaryLines = [
+        f"{color.CYAN}{color.BOLD}INFO{color.END} About to publish to universe {universeId} (env={env}):"
+    ]
+    nameWidth = max(len(name) for name in targets.keys())
+    for name in sorted(targets.keys()):
+        summaryLines.append(f"        - {name.ljust(nameWidth)}  ->  {targets[name]}")
+    summaryLines.append(f"{color.CYAN}{color.BOLD}INFO{color.END} versionType: {versionType}")
+    summaryLines.append(
+        f"{color.CYAN}{color.BOLD}INFO{color.END} artifact: {artifactPath} "
+        f"({len(placeBinary) / (1024 * 1024):.2f} MB, sha256 {digest[:16]}...)"
+    )
+
+    _confirmTargets(env, summaryLines, targets, expectPlaces)
+
+    try:
+        record = _uploadToTargets(
+            env=env,
+            universeId=universeId,
+            publishKey=publishKey,
+            targets=targets,
+            placeBinary=placeBinary,
+            versionType=versionType,
+        )
+    except SGFLError as err:
+        _writeJsonReport(jsonPath, err.record or {"env": env, "ok": False})
+        raise
+    record["artifact"] = {"path": artifactPath, "sha256": digest}
+    _writeJsonReport(jsonPath, record)
+
+
+def publishPlaces(
+    env: str,
+    *,
+    dryRun: bool = False,
+    noBuild: bool = False,
+    placesFilter: Optional[list[str]] = None,
+    versionType: str = "Published",
+    expectPlaces: Optional[list[str]] = None,
+    jsonPath: Optional[str] = None,
+):
+    """Interactive one-shot: build the artifact, then upload it.
+
+    Kept as the everyday command. CI should use `sgfl build` + `sgfl upload`
+    instead so the expensive half runs once and the bytes that were validated
+    are the exact bytes promoted.
+    """
+    announceStep(f"Loading environment file .env.{env}.")
+    loadEnvFile(env)
+
+    announceStep("Reading universe configuration.")
+    universeId = getEnvSafe("UNIVERSE_ID")
+    publishKey = getEnvSafe("PUBLISH_KEY")
+    downloadKey = getEnvSafe("DOWNLOAD_KEY")
+    executionKey = cloud.getExecutionKey()
+
+    targets, buildPlaceId = _resolvePublishTargets(placesFilter)
+    baseName, basePlaceId = _resolveBasePlace(targets, buildPlaceId)
+
     assetTable = _loadAssetTable()
     _checkForLegacyAssets(assetTable)
 
@@ -733,17 +1147,21 @@ def publishPlaces(
             details=f"Expected file at: {PLACE_FILE_PATH}.",
             suggestions=[
                 "Run sgfl publish without --no-build to build first.",
-                "Run lua/build.luau manually if you have a custom build pipeline.",
+                "Run rojo build default.project.json -o Place.rbxl manually if you have a custom build pipeline.",
             ],
         )
 
     summaryLines = [
         f"{color.CYAN}{color.BOLD}INFO{color.END} About to publish to universe {universeId} (env={env}):"
     ]
-    nameWidth = max(len(name) for name in places.keys())
-    for name in sorted(places.keys()):
-        summaryLines.append(f"        - {name.ljust(nameWidth)}  ->  {places[name]}")
+    nameWidth = max(len(name) for name in targets.keys())
+    for name in sorted(targets.keys()):
+        summaryLines.append(f"        - {name.ljust(nameWidth)}  ->  {targets[name]}")
     summaryLines.append(f"{color.CYAN}{color.BOLD}INFO{color.END} versionType: {versionType}")
+    summaryLines.append(
+        f"{color.CYAN}{color.BOLD}INFO{color.END} apply target (Saved base versions): "
+        f"{baseName} ({basePlaceId})"
+    )
     if noBuild:
         summaryLines.append(
             f"{color.CYAN}{color.BOLD}INFO{color.END} {_formatPlaceFileSummary(PLACE_FILE_PATH)} (existing — --no-build)"
@@ -752,40 +1170,61 @@ def publishPlaces(
         summaryLines.append(
             f"{color.CYAN}{color.BOLD}INFO{color.END} The place will be built fresh via rojo + the cloud apply pipeline."
         )
-    if dryRun:
-        summaryLines.append(f"{color.YELLOW}{color.BOLD}DRY-RUN{color.END} no upload will be performed.")
 
+    # A dry run does the entire build — rojo, entry-file collection, the cloud
+    # apply, the sidecar patch — and stops at the upload. That is the only way
+    # it can actually tell you the publish would have worked; the old version
+    # returned before the build and validated nothing but env vars.
     if dryRun:
         print()
         for line in summaryLines:
             print(line)
         print(
-            f"\n{color.YELLOW}{color.BOLD}DRY-RUN{color.END} would publish to {len(places)} place(s); skipping confirmation, build, and upload."
+            f"\n{color.YELLOW}{color.BOLD}DRY-RUN{color.END} building the place file; "
+            f"no upload will be performed."
+        )
+        if not noBuild:
+            _runRojoBuild()
+        try:
+            placeBinary = cloud.buildFinalPlace(
+                universeId=universeId,
+                basePlaceId=basePlaceId,
+                executionKey=executionKey,
+                publishKey=publishKey,
+                downloadKey=downloadKey,
+                assetTable=assetTable,
+                placeFilePath=PLACE_FILE_PATH,
+            )
+        finally:
+            if not noBuild:
+                deleteFile(PLACE_FILE_PATH)
+        record = {
+            "env": env,
+            "universeId": universeId,
+            "dryRun": True,
+            "ok": True,
+            "artifactBytes": len(placeBinary),
+            "artifactSha256": _artifactDigest(placeBinary),
+            "places": [
+                {"name": name, "placeId": targets[name], "ok": None} for name in sorted(targets)
+            ],
+        }
+        _writeJsonReport(jsonPath, record)
+        print(
+            f"\n{color.YELLOW}{color.BOLD}DRY-RUN{color.END} built {len(placeBinary) / (1024 * 1024):.2f} MB "
+            f"successfully; would have published to {len(targets)} place(s)."
         )
         return
 
-    confirmPublish(env, summaryLines)
-
-    toggleMessage = (
-        f"{color.RED}{color.BOLD}PLEASE MOVE TO YES TO CONFIRM{color.END}"
-        f"  (←/→ to choose, Enter to commit)"
-    )
-    if not confirmToggle(toggleMessage, defaultYes=False):
-        announceStep("Aborted by user.")
-        raise typer.Exit(code=0)
+    _confirmTargets(env, summaryLines, targets, expectPlaces)
 
     if not noBuild:
         _runRojoBuild()
 
-    # Saved base versions are created on one place; the final bytes are then
-    # uploaded to every declared place. Prefer 'main' as the base.
-    baseName = "main" if "main" in places else sorted(places.keys())[0]
-    executionKey = cloud.getExecutionKey()
-    downloadKey = getEnvSafe("DOWNLOAD_KEY")
     try:
         placeBinary = cloud.buildFinalPlace(
             universeId=universeId,
-            basePlaceId=places[baseName],
+            basePlaceId=basePlaceId,
             executionKey=executionKey,
             publishKey=publishKey,
             downloadKey=downloadKey,
@@ -793,62 +1232,19 @@ def publishPlaces(
             placeFilePath=PLACE_FILE_PATH,
         )
     finally:
-        deleteFile(PLACE_FILE_PATH)
+        if not noBuild:
+            deleteFile(PLACE_FILE_PATH)
 
-    failures: list[dict] = []
-    for name in sorted(places.keys()):
-        failure = _publishPlaceFile(
-            name=name,
-            placeId=places[name],
+    try:
+        record = _uploadToTargets(
+            env=env,
             universeId=universeId,
             publishKey=publishKey,
+            targets=targets,
             placeBinary=placeBinary,
             versionType=versionType,
         )
-        if failure is not None:
-            failures.append(failure)
-
-    print(f"\n{color.BOLD}Publish summary{color.END} (env={env}, universe={universeId}):")
-    nameWidth = max(len(name) for name in places.keys())
-    failedNames = {f["name"] for f in failures}
-    for name in sorted(places.keys()):
-        marker = (
-            f"{color.RED}{color.BOLD}FAIL{color.END}"
-            if name in failedNames
-            else f"{color.GREEN}{color.BOLD} OK {color.END}"
-        )
-        line = f"  {marker}  {name.ljust(nameWidth)}  ->  {places[name]}"
-        if name in failedNames:
-            reason = next(f["reason"] for f in failures if f["name"] == name)
-            line += f"   {reason}"
-        print(line)
-
-    deleteFile(PLACE_FILE_PATH)
-
-    if failures:
-        anyAuthError = any(
-            f.get("statusCode") in (401, 403) for f in failures
-        )
-        suggestions = [
-            "Inspect each failed place's HTTP diagnostics with --detailed.",
-            "Confirm UNIVERSE_ID and every PLACE_ID_<NAME> point to the right place.",
-        ]
-        if anyAuthError:
-            suggestions.append(
-                "PUBLISH_KEY may lack permissions on one or more places — check scopes and allowed-IP settings in the Creator Dashboard."
-            )
-
-        diagnostics: dict[str, list[str]] = {}
-        for f in failures:
-            diagnostics[f"HTTP diagnostics ({f['name']})"] = f["diagnostics"]
-
-        raise SGFLError(
-            f"{len(failures)} of {len(places)} place(s) failed to publish.",
-            details="; ".join(f"{f['name']}: {f['reason']}" for f in failures),
-            suggestions=suggestions,
-            diagnostics=diagnostics,
-        )
-
-    print(
-        f"\n{color.GREEN}{color.BOLD}SUCCESS{color.END} Published to {len(places)} place(s) in universe {universeId}."
-    )
+    except SGFLError as err:
+        _writeJsonReport(jsonPath, err.record or {"env": env, "ok": False})
+        raise
+    _writeJsonReport(jsonPath, record)
