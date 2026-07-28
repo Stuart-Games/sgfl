@@ -2,7 +2,18 @@ import sys
 
 import typer
 
-from .sgfl import start, save, init, publish, migrate, update, authLoginCmd, authStatusCmd
+from .sgfl import (
+    start,
+    save,
+    init,
+    build,
+    upload,
+    publish,
+    migrate,
+    update,
+    authLoginCmd,
+    authStatusCmd,
+)
 
 # Legacy Windows consoles decode stdout as cp1252, which cannot encode the
 # arrow glyphs in interactive prompts; replace rather than crash mid-task
@@ -14,6 +25,8 @@ app = typer.Typer(pretty_exceptions_enable=False)
 app.command()(start)
 app.command()(save)
 app.command()(init)
+app.command()(build)
+app.command()(upload)
 app.command()(publish)
 app.command()(migrate)
 app.command()(update)

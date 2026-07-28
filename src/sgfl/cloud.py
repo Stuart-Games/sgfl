@@ -44,6 +44,18 @@ REQUEST_TIMEOUT_SECONDS = 30
 TRANSFER_TIMEOUT_SECONDS = 300
 TASK_TIMEOUT = "300s"
 
+# Transient-failure handling. A publish that has already uploaded its Saved
+# base version must not die because one packet went missing mid-poll.
+MAX_RETRIES = 4
+# 5s, 10s, 20s, 40s — 75s cumulative, so a retry sequence can outlast the
+# 1-minute window of the 5-task-creations-per-minute limit.
+RETRY_BASE_DELAY_SECONDS = 5
+RETRY_MAX_DELAY_SECONDS = 60
+# Ceiling on the whole create->COMPLETE poll loop. TASK_TIMEOUT bounds the
+# script's own runtime, but a task wedged in QUEUED would otherwise poll
+# forever and hang a CI job until the runner is killed.
+TASK_POLL_TIMEOUT_SECONDS = 900
+
 LEGACY_EXECUTION_KEY_PATH = os.path.join(os.path.expanduser("~"), ".sgfl", "execution.key")
 
 # Entries projected as engine blobs rather than text unless assets.json says
@@ -69,16 +81,74 @@ def _requestDiagnostics(method: str, url: str, keyName: str, key: str, response=
     return lines
 
 
-def _cloudRequest(method: str, url: str, *, keyName: str, key: str, step: str, suggestions: list[str], **kwargs):
-    try:
-        response = requests.request(
-            method,
-            url,
-            headers={"x-api-key": key, **kwargs.pop("headers", {})},
-            timeout=kwargs.pop("timeout", REQUEST_TIMEOUT_SECONDS),
-            **kwargs,
-        )
-    except requests.RequestException as exc:
+def _retryDelay(response, attempt: int) -> float:
+    """Backoff for one retry: honor Retry-After when Roblox sends it, else
+    exponential (5s, 10s, 20s, ...) capped at RETRY_MAX_DELAY_SECONDS."""
+    if response is not None:
+        header = response.headers.get("Retry-After")
+        if header:
+            try:
+                return max(1.0, min(float(header.strip()), RETRY_MAX_DELAY_SECONDS))
+            except ValueError:
+                pass
+    return min(RETRY_BASE_DELAY_SECONDS * (2**attempt), RETRY_MAX_DELAY_SECONDS)
+
+
+def _isRetryable(method: str, status: Optional[int], allowUnsafeRetry: bool) -> bool:
+    """429 is always safe to retry: the request was rejected before it did
+    anything. 5xx and connection errors are only safe when re-running the
+    request cannot create a second copy of something — GETs, and calls the
+    caller explicitly marks as replayable. A place-version POST that 500s may
+    well have created the version, so it is never retried automatically."""
+    if status == 429:
+        return True
+    if not (allowUnsafeRetry or method.upper() == "GET"):
+        return False
+    return status is None or status in (500, 502, 503, 504)
+
+
+def _cloudRequest(
+    method: str,
+    url: str,
+    *,
+    keyName: str,
+    key: str,
+    step: str,
+    suggestions: list[str],
+    retries: int = MAX_RETRIES,
+    allowUnsafeRetry: bool = False,
+    **kwargs,
+):
+    headers = {"x-api-key": key, **kwargs.pop("headers", {})}
+    timeout = kwargs.pop("timeout", REQUEST_TIMEOUT_SECONDS)
+
+    attempt = 0
+    while True:
+        response = None
+        exc: Optional[requests.RequestException] = None
+        try:
+            response = requests.request(method, url, headers=headers, timeout=timeout, **kwargs)
+        except requests.RequestException as caught:
+            exc = caught
+
+        status = response.status_code if response is not None else None
+        failed = exc is not None or (status is not None and status >= 400)
+        if not failed:
+            return response
+
+        if attempt < retries and _isRetryable(method, status, allowUnsafeRetry):
+            delay = _retryDelay(response, attempt)
+            reason = f"HTTP {status}" if status is not None else type(exc).__name__
+            print(
+                f"{color.YELLOW}{color.BOLD}RETRY{color.END} {step}: {reason} — "
+                f"retrying in {delay:.0f}s ({attempt + 1}/{retries})."
+            )
+            time.sleep(delay)
+            attempt += 1
+            continue
+        break
+
+    if exc is not None:
         raise SGFLError(
             f"{step} failed (network error).",
             details=str(exc),
@@ -99,6 +169,31 @@ def _cloudRequest(method: str, url: str, *, keyName: str, key: str, step: str, s
             diagnostics={"HTTP diagnostics": _requestDiagnostics(method, url, keyName, key, response=response)},
         )
     return response
+
+
+def _getWithRetry(url: str, *, step: str):
+    """Plain GET on a pre-signed URL (no API key), with the same backoff as
+    _cloudRequest. Returns the final response — the caller checks its status."""
+    attempt = 0
+    while True:
+        response = None
+        try:
+            response = requests.get(url, timeout=TRANSFER_TIMEOUT_SECONDS)
+        except requests.RequestException as exc:
+            if attempt >= MAX_RETRIES:
+                raise SGFLError(f"{step} failed (network error).", details=str(exc))
+        status = response.status_code if response is not None else None
+        if response is not None and status is not None and status < 400:
+            return response
+        if attempt >= MAX_RETRIES or not _isRetryable("GET", status, False):
+            return response
+        delay = _retryDelay(response, attempt)
+        print(
+            f"{color.YELLOW}{color.BOLD}RETRY{color.END} {step}: "
+            f"{f'HTTP {status}' if status else 'network error'} — retrying in {delay:.0f}s."
+        )
+        time.sleep(delay)
+        attempt += 1
 
 
 def getExecutionKey() -> str:
@@ -166,7 +261,18 @@ def runExecutionTask(
     task = response.json()
     taskPath = task["path"]
 
+    deadline = time.monotonic() + TASK_POLL_TIMEOUT_SECONDS
     while task["state"] in ("QUEUED", "PROCESSING"):
+        if time.monotonic() > deadline:
+            raise SGFLError(
+                f"{step} did not finish within {TASK_POLL_TIMEOUT_SECONDS}s.",
+                details=f"Task {taskPath} was last seen in state {task['state']}.",
+                suggestions=[
+                    "Nothing further was uploaded — check the place's version history before re-running.",
+                    "Check the Roblox status page; execution sessions may be degraded.",
+                ],
+                diagnostics={"Task diagnostics": [f"task path: {taskPath}", f"state: {task['state']}"]},
+            )
         time.sleep(POLL_SECONDS)
         task = _cloudRequest(
             "GET",
@@ -209,7 +315,7 @@ def runExecutionTask(
                 f"{step} completed but returned no binary output.",
                 suggestions=["This is an internal pipeline error — report it to maintainers."],
             )
-        downloadResponse = requests.get(binaryOutputUri, timeout=TRANSFER_TIMEOUT_SECONDS)
+        downloadResponse = _getWithRetry(binaryOutputUri, step="Downloading task binary output")
         if downloadResponse.status_code >= 400:
             raise SGFLError(
                 "Downloading the task's binary output failed.",
@@ -272,10 +378,7 @@ def downloadPlaceFile(placeId: str, downloadKey: str, version: Optional[int] = N
             "Roblox response did not include a download location.",
             suggestions=["Verify DOWNLOAD_KEY has the asset-delivery scope."],
         )
-    try:
-        fileResponse = requests.get(location, timeout=TRANSFER_TIMEOUT_SECONDS)
-    except requests.RequestException as exc:
-        raise SGFLError("Place file download failed (network error).", details=str(exc))
+    fileResponse = _getWithRetry(location, step="Downloading place file")
     if fileResponse.status_code >= 400:
         raise SGFLError(
             "Place file download failed.",

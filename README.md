@@ -32,6 +32,10 @@ UNIVERSE_ID    the id of the experience it belongs to
 
 For multi-place publishing, an `.env.<env>` file (e.g. `.env.prod`) holds one `PLACE_ID_<NAME>` per target place plus `UNIVERSE_ID`. These files contain only ids and are safe to commit.
 
+`PLACE_ID_BUILD` is reserved. It designates an empty scratch place in the same universe that the cloud apply runs against, and it is never published to. Declare one: the apply uploads an asset-less base version to its target place before applying your entry files, so if the task fails, that target is left holding a build with no assets. Pointing it at a scratch place keeps that off your live places entirely.
+
+Values already present in the environment take precedence over `.env.<env>` (a warning names any that were shadowed), so CI can supply ids and keys as secrets without the committed file overriding them.
+
 ## `assets.json`
 
 An `assets.json` file is required in the root directory to specify which parts of the place are saved.
@@ -151,7 +155,66 @@ Before anything is written, `sgfl` checks whether the projection would empty an 
 
 run the command `sgfl publish <env>` (e.g. `sgfl publish prod`).
 
-Builds once and uploads the same final place to every `PLACE_ID_<NAME>` in `.env.<env>`. Requires typed confirmation. Useful flags: `--dry-run`, `--places lobby,arena`, `--version-type Saved`.
+Builds once and uploads the same final place to every `PLACE_ID_<NAME>` in `.env.<env>`. Requires typed confirmation. Useful flags: `--dry-run` (runs the whole build and stops before uploading), `--places lobby,arena`, `--version-type Saved`, `--json report.json`.
+
+### Automated publishing (CI/CD)
+
+`sgfl publish` is the interactive one-shot. For anything unattended, use the two halves separately:
+
+```bash
+sgfl build prod --out dist/place.rbxl
+```
+
+```bash
+sgfl upload dist/place.rbxl prod --expect-places main,lobby --json dist/report.json
+```
+
+`build` does the expensive, rate-limited half — rojo, the cloud apply, the sidecar patch — against the scratch build place and writes the finished bytes to disk. `upload` promotes those exact bytes and nothing else, so what you validated is what ships, a partial failure is safe to re-run, and promoting the same artifact to a second environment costs no execution task.
+
+Set `SGFL_CI=1` for automated runs. That swaps the interactive confirmation for `--expect-places`: the upload aborts unless the env file resolves to exactly the places you named, so adding a `PLACE_ID_<NAME>` can't silently widen what a workflow publishes to. It also makes `PLACE_ID_BUILD` mandatory and lets a missing `.env.<env>` fall back to the process environment.
+
+sgfl ships no workflow files. The pipeline lives once, as a reusable workflow in your org — see below — and each game repo carries only a short caller. It needs three secrets: `SGFL_PUBLISH_KEY`, `SGFL_DOWNLOAD_KEY`, `SGFL_EXECUTION_KEY`.
+
+There is no rollback command. The build artifact is the rollback mechanism: keep the artifacts your workflow uploads, and `sgfl upload` a previous one to revert.
+
+### Using sgfl across an organization
+
+**Put the API keys on a dedicated service account, not a person's.** Roblox has no group-owned API keys — every key belongs to a user account and inherits that account's permissions. The supported pattern is a separate account invited to the group with a minimal role, owning `PUBLISH_KEY`, `DOWNLOAD_KEY` and `EXECUTION_KEY`. A developer's personal key takes the whole pipeline down when they leave or rotate it, publishes under their name, and carries their access to every other group resource.
+
+**Key permissions stop at the experience.** Scopes are granted per experience (universe), never per place, so a key that can build can also publish to every live place in that experience. What you *can* split is capability: the build job needs Luau Execution + place publishing + asset delivery, while the upload job needs only place publishing, so issue the upload key with strictly less.
+
+**Define the secrets once, at the org.** Organization → Settings → Secrets and variables → Actions → New organization secret, scoped to selected repositories. Every game repo then inherits `SGFL_PUBLISH_KEY` / `SGFL_DOWNLOAD_KEY` / `SGFL_EXECUTION_KEY` with nothing to copy. (Org secrets for private repos need a Team plan or higher.)
+
+**Maintain the workflow once.** The pipeline lives in `Stuart-Games/.github` as `.github/workflows/sgfl-publish.yml` — a `workflow_call` workflow that runs `sgfl build`, uploads the artifact, then runs `sgfl upload` in an environment-gated job. Tag it `v1`. Each game repo then carries only a caller:
+
+```yaml
+name: sgfl publish
+on:
+  workflow_dispatch:
+    inputs:
+      env:
+        required: true
+        default: production
+      places:
+        required: true
+        default: main
+jobs:
+  publish:
+    uses: Stuart-Games/.github/.github/workflows/sgfl-publish.yml@v1
+    with:
+      env: ${{ inputs.env }}
+      places: ${{ inputs.places }}
+      sgflRef: v2.5.0
+    secrets: inherit
+```
+
+Approvals stay per repo — GitHub environments can't be defined org-wide — so each game still needs its `production` environment with required reviewers under Settings → Environments.
+
+**Pin `sgflRef` per repo.** Floating on `main` means one sgfl change can break every game at once. Pinning lets you roll the fleet forward one repo at a time.
+
+**Each universe needs its own scratch build place.** Execution tasks are universe-scoped, so `PLACE_ID_BUILD` cannot be shared between games — one empty place per universe, declared in that repo's `.env.<env>`.
+
+**The rate limit is per key owner, not per key.** Task creation is capped at 5/minute for whoever owns the key, so every game sharing the group's key draws on one budget, and issuing more keys under the same group buys nothing. One `sgfl build` is one task, so this only bites when several games build at once; sgfl backs off and retries on 429 rather than failing. The per-repo concurrency group serializes a single repo, not the org.
 
 ### To Create a New Project
 

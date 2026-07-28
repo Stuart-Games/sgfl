@@ -1,6 +1,9 @@
 # Project place file
 /*.rbxl
 
+# Built place artifacts (sgfl build --out)
+/dist/
+
 # Roblox Studio lock files
 /*.rbxl.lock
 sourcemap.json

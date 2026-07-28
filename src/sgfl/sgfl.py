@@ -1,6 +1,5 @@
 import typer
-from typing import Optional, Callable
-from typing_extensions import Annotated
+from typing import Annotated, Optional, Callable
 from .util import *
 from .operations import *
 
@@ -195,6 +194,124 @@ def init():
     )
 
 
+def build(
+    env: Annotated[
+        str,
+        typer.Argument(
+            help="Env name. Loads .env.<env> on top of ~/.sgfl/credentials.",
+        ),
+    ],
+    out: Annotated[
+        str,
+        typer.Option(
+            "--out",
+            "-o",
+            help="Where to write the finished place file.",
+        ),
+    ] = "dist/place.rbxl",
+    noBuild: Annotated[
+        bool,
+        typer.Option(
+            "--no-build",
+            help="Skip rojo and reuse the existing Place.rbxl in the project root (it is not deleted afterwards).",
+        ),
+    ] = False,
+    detailed: Annotated[
+        bool,
+        typer.Option("--detailed", "-d", help="Print detailed .env and HTTP diagnostics if an error occurs."),
+    ] = False,
+):
+    """Build the final place file without publishing it.
+
+    Runs rojo plus the cloud apply against the scratch build place
+    (PLACE_ID_BUILD) and writes sidecar-patched bytes to --out. Publish them
+    later with `sgfl upload`. Safe to run unattended: no live place is touched.
+    """
+    loadCredentials()
+    _runTask(
+        "build",
+        detailed=detailed,
+        pullEnabled=False,
+        envDiagnosticKeys=["UNIVERSE_ID", "PUBLISH_KEY", "DOWNLOAD_KEY", "EXECUTION_KEY"],
+        fn=lambda: buildArtifact(env, outPath=out, noBuild=noBuild),
+    )
+
+
+def upload(
+    artifact: Annotated[
+        str,
+        typer.Argument(help="Path to a place file produced by sgfl build."),
+    ],
+    env: Annotated[
+        str,
+        typer.Argument(
+            help="Env name. Loads .env.<env> on top of ~/.sgfl/credentials.",
+        ),
+    ],
+    places: Annotated[
+        Optional[str],
+        typer.Option(
+            "--places",
+            help="Comma-separated subset of place names to publish (e.g. 'lobby,arena'). Default: every PLACE_ID_<NAME> in the env file.",
+        ),
+    ] = None,
+    expectPlaces: Annotated[
+        Optional[str],
+        typer.Option(
+            "--expect-places",
+            help="Comma-separated place names the caller expects to publish to. Aborts on any mismatch. Required when SGFL_CI is set.",
+        ),
+    ] = None,
+    versionType: Annotated[
+        str,
+        typer.Option("--version-type", help="Roblox version type. Either 'Published' or 'Saved'."),
+    ] = "Published",
+    jsonPath: Annotated[
+        Optional[str],
+        typer.Option("--json", help="Write a machine-readable result (per-place version numbers) to this path."),
+    ] = None,
+    detailed: Annotated[
+        bool,
+        typer.Option("--detailed", "-d", help="Print detailed .env and HTTP diagnostics if an error occurs."),
+    ] = False,
+):
+    """Publish an already-built place file to every declared place.
+
+    Uploads only — no rojo, no execution task, no rate limit — so a partial
+    failure is safe to re-run with the identical artifact.
+    """
+    _validateVersionType(versionType)
+    loadCredentials()
+    _runTask(
+        "upload",
+        detailed=detailed,
+        pullEnabled=False,
+        envDiagnosticKeys=["UNIVERSE_ID", "PUBLISH_KEY"],
+        fn=lambda: uploadArtifact(
+            env,
+            artifactPath=artifact,
+            placesFilter=_splitNames(places, "--places"),
+            versionType=versionType,
+            expectPlaces=_splitNames(expectPlaces, "--expect-places"),
+            jsonPath=jsonPath,
+        ),
+    )
+
+
+def _validateVersionType(versionType: str) -> None:
+    if versionType not in ("Published", "Saved"):
+        raise typer.BadParameter("--version-type must be either 'Published' or 'Saved'.")
+
+
+def _splitNames(raw: Optional[str], flagName: str) -> Optional[list[str]]:
+    if raw is None:
+        return None
+    names = [part.strip() for part in raw.split(",") if part.strip()]
+    if not names:
+        raise typer.BadParameter(f"{flagName} was provided but contained no usable names.")
+    return names
+
+
 def publish(
     env: Annotated[
         str,
@@ -214,14 +331,14 @@ def publish(
         bool,
         typer.Option(
             "--dry-run",
-            help="Validate config and build the place file, but skip the confirmation prompt and the upload.",
+            help="Run the full build (rojo + cloud apply + sidecar patch) and stop before uploading.",
         ),
     ] = False,
     noBuild: Annotated[
         bool,
         typer.Option(
             "--no-build",
-            help="Skip lua/build.luau and reuse the existing Place.rbxl in the project root.",
+            help="Skip rojo and reuse the existing Place.rbxl in the project root (it is not deleted afterwards).",
         ),
     ] = False,
     places: Annotated[
@@ -231,6 +348,13 @@ def publish(
             help="Comma-separated subset of place names to publish (e.g. 'lobby,arena'). Default: every PLACE_ID_<NAME> in the env file.",
         ),
     ] = None,
+    expectPlaces: Annotated[
+        Optional[str],
+        typer.Option(
+            "--expect-places",
+            help="Comma-separated place names the caller expects to publish to. Aborts on any mismatch. Required when SGFL_CI is set.",
+        ),
+    ] = None,
     versionType: Annotated[
         str,
         typer.Option(
@@ -238,19 +362,12 @@ def publish(
             help="Roblox version type to publish as. Either 'Published' or 'Saved'.",
         ),
     ] = "Published",
+    jsonPath: Annotated[
+        Optional[str],
+        typer.Option("--json", help="Write a machine-readable result (per-place version numbers) to this path."),
+    ] = None,
 ):
-    if versionType not in ("Published", "Saved"):
-        raise typer.BadParameter(
-            "--version-type must be either 'Published' or 'Saved'."
-        )
-
-    placesFilter: Optional[list[str]] = None
-    if places:
-        placesFilter = [p.strip() for p in places.split(",") if p.strip()]
-        if not placesFilter:
-            raise typer.BadParameter(
-                "--places was provided but contained no usable names."
-            )
+    _validateVersionType(versionType)
 
     loadCredentials()
 
@@ -263,8 +380,10 @@ def publish(
             env,
             dryRun=dryRun,
             noBuild=noBuild,
-            placesFilter=placesFilter,
+            placesFilter=_splitNames(places, "--places"),
             versionType=versionType,
+            expectPlaces=_splitNames(expectPlaces, "--expect-places"),
+            jsonPath=jsonPath,
         ),
     )
 
