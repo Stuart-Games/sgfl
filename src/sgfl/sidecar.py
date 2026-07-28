@@ -275,11 +275,15 @@ def patchFile(data, patches):
     """Write values back into place-file bytes.
 
     `patches` is {(className, propName): [values]} (one value per instance of
-    the class, in file order). Returns (patchedBytes, appliedKeys, problems).
+    the class, in file order). Returns
+    (patchedBytes, appliedKeys, problems, omitted). `problems` are fatal —
+    something was wrong with a value we could have written. `omitted` are
+    properties the engine did not serialize at all, which cannot be written
+    and are reported rather than fatal; see the tail of this function.
     Only matching PROP chunks are touched; everything else is copied verbatim.
     """
     if data[: len(MAGIC)] != MAGIC:
-        return data, set(), ["not a Roblox binary file (magic mismatch)"]
+        return data, set(), ["not a Roblox binary file (magic mismatch)"], []
 
     out = bytearray(data[:32])
     pos = 32
@@ -288,6 +292,7 @@ def patchFile(data, patches):
     wantedClasses = {c for c, _ in patches}
     applied = set()
     problems = []
+    omitted = []
 
     while pos + 16 <= len(data):
         chunkStart = pos
@@ -357,12 +362,27 @@ def patchFile(data, patches):
 
     out += data[pos:]  # never drop trailing bytes
 
+    presentClasses = set(classNames.values())
     for key in patches:
-        if key not in applied and not any(f"{key[0]}.{key[1]}" in prob for prob in problems):
-            problems.append(
-                f"{key[0]}.{key[1]}: no PROP chunk in file (default-omitted or renamed) — NOT patched"
+        if key in applied or any(f"{key[0]}.{key[1]}" in prob for prob in problems):
+            continue
+        if key[0] in presentClasses:
+            # The class is in the file, so the subtree built fine — the engine
+            # simply serialized this property at its default and omitted it.
+            # There is no chunk to rewrite and no way to insert one, so failing
+            # here does not protect anything: it just makes the project
+            # permanently unbuildable. Report it and keep the engine's value.
+            omitted.append(
+                f"{key[0]}.{key[1]}: not serialized in the applied place "
+                f"(engine default) — keeping the engine's value"
             )
-    return bytes(out), applied, problems
+        else:
+            # The whole class is missing. That is structural, not a default:
+            # something the entry files describe did not survive the apply.
+            problems.append(
+                f"{key[0]}.{key[1]}: class {key[0]} is absent from the file entirely — NOT patched"
+            )
+    return bytes(out), applied, problems, omitted
 
 
 def renderSidecarValue(typeId, value):
