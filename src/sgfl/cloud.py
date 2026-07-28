@@ -388,6 +388,58 @@ def downloadPlaceFile(placeId: str, downloadKey: str, version: Optional[int] = N
     return fileResponse.content
 
 
+_VERSION_PATH_PATTERN = re.compile(r"/versions/(\d+)$")
+
+# One page is plenty: we only ever compare against a base version created
+# moments ago, so the versions we care about are the newest few.
+VERSION_PAGE_SIZE = 50
+
+
+def listPlaceVersions(placeId: str, downloadKey: str) -> Optional[list[int]]:
+    """Version numbers that exist for a place, or None if we could not ask.
+
+    This is the only way to learn which version the apply task's
+    SavePlaceAsync produced. SavePlaceAsync returns nothing, and the engine
+    does not refresh game.PlaceVersion in-session (verified: a session that
+    booted at version 5 and saved still reported 5), so without this the
+    caller is reduced to assuming baseVersion + 1.
+
+    Places are assets, so this is the Assets API rather than cloud/v2 — see
+    https://devforum.roblox.com/t/add-an-open-cloud-endpoint-for-getting-the-version-of-a-place/3442419
+    where staff point at ListAssetVersions for exactly this problem. The
+    version number lives in each entry's `path`, as assets/{id}/versions/{n}.
+
+    Returns None rather than raising: an unavailable listing is a downgrade in
+    confidence, not a failure. Deciding whether that downgrade is acceptable
+    belongs to the caller, which knows whether the place is shared.
+    """
+    try:
+        response = _cloudRequest(
+            "GET",
+            f"https://apis.roblox.com/assets/v1/assets/{placeId}/versions",
+            keyName="DOWNLOAD_KEY",
+            key=downloadKey,
+            step="Listing place versions",
+            suggestions=[],
+            params={"maxPageSize": VERSION_PAGE_SIZE},
+        )
+    except SGFLError as err:
+        print(
+            f"{color.YELLOW}{color.BOLD}WARN{color.END} "
+            f"Could not list place versions ({err.message.rstrip('.')}). "
+            f"Grant DOWNLOAD_KEY the Assets read permission on this universe to "
+            f"identify the applied version instead of inferring it."
+        )
+        return None
+
+    versions = []
+    for entry in response.json().get("assetVersions") or []:
+        match = _VERSION_PATH_PATTERN.search(entry.get("path") or "")
+        if match:
+            versions.append(int(match.group(1)))
+    return versions or None
+
+
 # ---------------------------------------------------------------------------
 # Container format shared with the Luau scripts:
 #   [u32 manifestLen][manifest JSON][file data ...]
@@ -1040,56 +1092,98 @@ def uploadPlaceVersion(
     return response.json()["versionNumber"]
 
 
-def _unreportedSaveVersion(baseVersion: int, strict: bool, why: str) -> int:
+def _inferredSaveVersion(baseVersion: int, strict: bool, why: str) -> int:
+    """Last resort: assume the save took the next number.
+
+    Sound only while nothing else writes to the place during the task, which
+    runs for minutes. On a build place shared between repos that assumption can
+    land on *another project's* version — and the byte-identity guard in
+    buildFinalPlace won't catch it, because it compares against our own base
+    bytes and another project's build is not byte-identical to ours. So under
+    `strict` this refuses rather than guesses.
+    """
     if not strict:
         return baseVersion + 1
     raise SGFLError(
-        "The apply task did not report which version it saved.",
+        "Could not determine which version the apply task saved.",
         details=(
-            f"Base version {baseVersion}, but {why}. On a build place that other "
+            f"Base version {baseVersion}, and {why}. On a build place that other "
             "projects also build against, assuming version "
             f"{baseVersion + 1} could download a different project's place file."
         ),
         suggestions=[
-            "Nothing was uploaded. Re-run the build — this is usually transient.",
-            "If it persists, the engine version pinned to this place stopped refreshing "
-            "PlaceVersion in-session; give this project its own build place "
-            "(unset UNIVERSE_ID_BUILD) until it is fixed.",
+            "Nothing was uploaded. Grant DOWNLOAD_KEY the Assets read permission on "
+            "this universe — that lets sgfl read the real version instead of inferring it.",
+            "Or give this project its own build place, where the inference is sound "
+            "because nothing else writes to it.",
         ],
     )
 
 
-def _postSaveVersion(applyResult: dict, baseVersion: int, *, strict: bool = False) -> int:
-    """Version the apply task's SavePlaceAsync produced.
+def _postSaveVersion(
+    applyResult: dict,
+    baseVersion: int,
+    observedVersions: Optional[list[int]] = None,
+    *,
+    strict: bool = False,
+) -> int:
+    """Version the apply task's SavePlaceAsync produced, best source first.
 
-    apply.luau reports game.PlaceVersion after the save. If the engine updated
-    it in-session we get the authoritative number (and a concurrent writer just
-    means a gap); if it did not, the value is <= baseVersion and we fall back to
-    the documented baseVersion + 1.
-
-    That fallback is a guess that only holds while nobody else writes to the
-    place. On a build place shared between repos it can point at *another
-    project's* version — and the byte-identity guard below won't catch it,
-    because it only compares against our own base bytes, and another project's
-    build is not byte-identical to ours. Downloading it would hand this build
-    someone else's game. `strict` refuses to guess instead."""
+    1. The engine's own post-save game.PlaceVersion. Authoritative when present,
+       but in practice it is not: the engine does not refresh it in-session, so
+       it comes back equal to baseVersion. Kept because it costs nothing and
+       becomes correct the day Roblox changes that.
+    2. The versions that actually exist on the place (listPlaceVersions).
+       Exactly one above base is ours, with certainty. Several means someone
+       else really did write during the task — the case `strict` exists for,
+       now detected from evidence rather than assumed.
+    3. baseVersion + 1.
+    """
     reported = applyResult.get("savedVersion")
-    if isinstance(reported, bool) or not isinstance(reported, (int, float)):
-        return _unreportedSaveVersion(baseVersion, strict, "the task reported no version")
-    reported = int(reported)
-    if reported <= baseVersion:
-        return _unreportedSaveVersion(
-            baseVersion,
-            strict,
-            f"the engine did not refresh PlaceVersion in-session (still {reported})",
-        )
-    if reported != baseVersion + 1:
+    if not isinstance(reported, bool) and isinstance(reported, (int, float)):
+        reported = int(reported)
+        if reported > baseVersion:
+            if reported != baseVersion + 1:
+                print(
+                    f"{color.YELLOW}{color.BOLD}WARN{color.END} "
+                    f"Another version landed on this place while the apply task ran "
+                    f"(base {baseVersion}, applied {reported}) — using the engine-reported version."
+                )
+            return reported
+
+    newer = sorted(v for v in (observedVersions or []) if v > baseVersion)
+    if len(newer) == 1:
+        return newer[0]
+    if len(newer) > 1:
+        if strict:
+            raise SGFLError(
+                "More than one place version was created while the apply task ran.",
+                details=(
+                    f"Base version {baseVersion}; versions {', '.join(str(v) for v in newer)} "
+                    "all appeared since. Another project almost certainly built against this "
+                    "place at the same time, and nothing identifies which version is ours."
+                ),
+                suggestions=[
+                    "Nothing was uploaded. Re-run the build — collisions are transient.",
+                    "If this is frequent, give this project its own build place so it is "
+                    "never contending for version numbers.",
+                ],
+            )
         print(
             f"{color.YELLOW}{color.BOLD}WARN{color.END} "
-            f"Another version landed on this place while the apply task ran "
-            f"(base {baseVersion}, applied {reported}) — using the engine-reported version."
+            f"Versions {', '.join(str(v) for v in newer)} all landed on this place since "
+            f"base {baseVersion} — assuming {baseVersion + 1} is ours."
         )
-    return reported
+        return baseVersion + 1
+
+    if observedVersions:
+        # The listing worked but shows nothing past base. Most likely the
+        # listing is lagging behind the save rather than the save not having
+        # happened, so infer rather than declare failure.
+        return _inferredSaveVersion(
+            baseVersion, strict, "the version listing showed nothing newer than it"
+        )
+    return _inferredSaveVersion(baseVersion, strict, "the version listing was unavailable")
 
 
 def buildFinalPlace(
@@ -1169,13 +1263,15 @@ def buildFinalPlace(
             ],
         )
 
-    # Which version did the session's SavePlaceAsync produce? baseVersion + 1
-    # is only true if nothing else wrote to the place during the task — and the
-    # task runs for minutes, so a second developer's `sgfl start` (its base
-    # upload takes a version) or a Studio save can slip in and shift it. Trust
-    # the engine's own post-save PlaceVersion when it reports one; the +1
-    # assumption is the fallback for engine versions that don't update it.
-    savedVersion = _postSaveVersion(applyResult, baseVersion, strict=strictSaveVersion)
+    # Which version did the session's SavePlaceAsync produce? Nothing hands us
+    # that number: SavePlaceAsync returns nothing, and the engine does not
+    # refresh game.PlaceVersion in-session. So ask the place what versions it
+    # actually has — see listPlaceVersions — and fall back to baseVersion + 1,
+    # which holds only while nothing else wrote during the task.
+    observedVersions = listPlaceVersions(basePlaceId, downloadKey)
+    savedVersion = _postSaveVersion(
+        applyResult, baseVersion, observedVersions, strict=strictSaveVersion
+    )
     announceStep(f"Downloading applied place (version {savedVersion}) for sidecar patch.")
     finalBytes = downloadPlaceFile(basePlaceId, downloadKey, savedVersion)
     if finalBytes == baseBytes:
