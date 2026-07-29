@@ -7,6 +7,7 @@ from .sgfl import (
     save,
     init,
     build,
+    preflightCmd,
     upload,
     publish,
     migrate,
@@ -26,6 +27,7 @@ app.command()(start)
 app.command()(save)
 app.command()(init)
 app.command()(build)
+app.command("preflight")(preflightCmd)
 app.command()(upload)
 app.command()(publish)
 app.command()(migrate)

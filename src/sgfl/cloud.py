@@ -389,6 +389,57 @@ def downloadPlaceFile(placeId: str, downloadKey: str, version: Optional[int] = N
     return fileResponse.content
 
 
+def verifyKey(keyName: str, key: str, universeId: str) -> dict:
+    """Ask Roblox whether a key is still alive, without doing anything.
+
+    Roblox API keys expire. When one does, the legacy place-version endpoint
+    answers "User unauthorized to update place" — which reads as a permissions
+    problem and sends you to the dashboard looking at scopes. It cost three CI
+    runs and a wrong diagnosis to work out that a key had simply lapsed
+    overnight, and the answer was one GET away the whole time.
+
+    Every key is probed against the same universe read, and only the status
+    code is interpreted:
+      200 -> alive, and it happens to have universe read
+      401 -> dead. Expired, revoked, or malformed. This is the one that matters.
+      403 -> alive, but not scoped for this particular read. Fine: liveness is
+             all we are asking, and a dead key never gets as far as 403.
+    Anything else is reported verbatim rather than guessed at.
+
+    Returns a record rather than raising: the caller reports on every key
+    before deciding, so one dead key must not hide the state of the others.
+    """
+    url = f"{CLOUD_BASE}/universes/{universeId}"
+    try:
+        response = requests.get(url, headers={"x-api-key": key}, timeout=REQUEST_TIMEOUT_SECONDS)
+    except requests.RequestException as exc:
+        return {"key": keyName, "alive": None, "status": None, "note": f"network error: {exc}"}
+
+    status = response.status_code
+    if status == 401:
+        return {
+            "key": keyName,
+            "alive": False,
+            "status": status,
+            "note": "rejected — expired, revoked, or not a valid key",
+        }
+    if status == 403:
+        return {
+            "key": keyName,
+            "alive": True,
+            "status": status,
+            "note": f"alive (not scoped to read universe {universeId}, which this check does not require)",
+        }
+    if status < 400:
+        return {"key": keyName, "alive": True, "status": status, "note": "alive"}
+    return {
+        "key": keyName,
+        "alive": None,
+        "status": status,
+        "note": f"unexpected response: {(response.text or '').strip()[:200] or 'no body'}",
+    }
+
+
 _VERSION_PATH_PATTERN = re.compile(r"/versions/(\d+)$")
 
 # One page is plenty: we only ever compare against a base version created

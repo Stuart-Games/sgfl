@@ -139,6 +139,8 @@ def _toolDiagnosticsForTask(taskName: Optional[str], pullEnabled: bool) -> list[
         requiredTools.extend(["rojo", "code"])
         if pullEnabled:
             requiredTools.append("git")
+    elif taskName == "preflight":
+        pass  # deliberately needs no external tool
     elif taskName in ("publish", "build"):
         requiredTools.append("rojo")
     elif taskName == "init":

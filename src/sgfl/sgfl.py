@@ -257,6 +257,40 @@ def build(
     )
 
 
+def preflightCmd(
+    env: Annotated[
+        str,
+        typer.Argument(
+            help="Env name. Loads .env.<env> on top of ~/.sgfl/credentials.",
+        ),
+    ],
+    detailed: Annotated[
+        bool,
+        typer.Option("--detailed", "-d", help="Print detailed .env and HTTP diagnostics if an error occurs."),
+    ] = False,
+):
+    """Check every credential is present and still alive, then stop.
+
+    Does no work — no rojo, no execution task, no upload — so it is free to run
+    first in CI. An expired key fails here in seconds, named, instead of
+    several minutes into a build as "User unauthorized to update place".
+    """
+    loadCredentials()
+    _runTask(
+        "preflight",
+        detailed=detailed,
+        pullEnabled=False,
+        envDiagnosticKeys=[
+            "UNIVERSE_ID",
+            "UNIVERSE_ID_BUILD",
+            "PUBLISH_KEY",
+            "DOWNLOAD_KEY",
+            "EXECUTION_KEY",
+        ],
+        fn=lambda: preflight(env),
+    )
+
+
 def upload(
     artifact: Annotated[
         str,
