@@ -779,6 +779,31 @@ def _resolveBuildTarget(
     return getEnvSafe("UNIVERSE_ID"), name, placeId, False
 
 
+def _enforceIntegrity(failOnWarn: bool) -> None:
+    """Turn "the output may not match the repo" warnings into a failure.
+
+    Off by default because a human watching the output can judge for
+    themselves. Unattended there is nobody to judge, and the warnings that
+    matter are exactly the ones that do not stop the build: a checkout without
+    git-lfs made every blob entry a pointer stub, the engine skipped all three
+    with a warning, and the build was on course to succeed having dropped most
+    of the game.
+    """
+    if not failOnWarn:
+        return
+    warnings = integrityWarnings()
+    if not warnings:
+        return
+    raise SGFLError(
+        f"--fail-on-warn: {len(warnings)} warning(s) mean the output may not match the repo.",
+        details="; ".join(warnings),
+        suggestions=[
+            "Each warning above names what did not make it in — fix that rather than dropping the flag.",
+            "Blob entries arriving empty usually means the checkout did not fetch git-lfs objects.",
+        ],
+    )
+
+
 def _readArtifact(path: str) -> bytes:
     if not os.path.exists(path):
         raise SGFLError(
@@ -806,13 +831,14 @@ def _artifactDigest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def buildArtifact(env: str, *, outPath: str, noBuild: bool = False) -> dict:
+def buildArtifact(env: str, *, outPath: str, noBuild: bool = False, failOnWarn: bool = False) -> dict:
     """Produce final, sidecar-patched place bytes without publishing anything.
 
     This is the whole expensive half of the pipeline (rojo -> Saved base ->
     cloud apply -> download -> sidecar patch), and it touches only the scratch
     build place. Safe to run on every PR as a validation gate.
     """
+    resetIntegrityWarnings()
     announceStep(f"Loading environment file .env.{env}.")
     loadEnvFile(env)
 
@@ -866,6 +892,8 @@ def buildArtifact(env: str, *, outPath: str, noBuild: bool = False) -> dict:
         os.makedirs(outDir, exist_ok=True)
     with open(outPath, "wb") as f:
         f.write(placeBinary)
+
+    _enforceIntegrity(failOnWarn)
 
     digest = _artifactDigest(placeBinary)
     sizeMb = len(placeBinary) / (1024 * 1024)
@@ -1120,12 +1148,14 @@ def uploadArtifact(
     versionType: str = "Published",
     expectPlaces: Optional[list[str]] = None,
     jsonPath: Optional[str] = None,
+    failOnWarn: bool = False,
 ):
     """Promote already-built place bytes to every declared place.
 
     No rojo, no execution task, no rate limit — just uploads, so a partial
     failure can be retried immediately with the identical artifact.
     """
+    resetIntegrityWarnings()
     announceStep(f"Loading environment file .env.{env}.")
     loadEnvFile(env)
 
@@ -1150,6 +1180,8 @@ def uploadArtifact(
     )
 
     _confirmTargets(env, summaryLines, targets, expectPlaces)
+
+    _enforceIntegrity(failOnWarn)
 
     try:
         record = _uploadToTargets(
@@ -1258,6 +1290,7 @@ def publishPlaces(
         finally:
             if not noBuild:
                 deleteFile(PLACE_FILE_PATH)
+        _enforceIntegrity(failOnWarn)
         record = {
             "env": env,
             "universeId": universeId,

@@ -91,6 +91,36 @@ def setEnvSuffix(suffix: str):
     _envSuffix = suffix.strip().upper()
 
 
+# Warnings split into two kinds. Most are informational — a missing env file
+# under SGFL_CI, a swept stale file — and a run that emits them is still
+# correct. A few mean the artifact may not contain what the repo says it
+# should: a blob that failed to deserialize, a sidecar property that could not
+# be written, a version number that had to be inferred. Those are `integrity`
+# warnings, and --fail-on-warn trips on those and only those.
+#
+# The distinction is not cosmetic. A checkout without git-lfs turned every
+# blob entry into a pointer stub, the engine skipped all three, and the build
+# would have gone green having silently dropped most of the game — because
+# nothing was watching the warnings.
+_integrityWarnings: list[str] = []
+
+
+def warn(message: str, *, integrity: bool = False) -> None:
+    """Print a WARN line, recording it when it bears on whether the output is
+    trustworthy. Never raises: deciding what to do about it is the caller's."""
+    if integrity:
+        _integrityWarnings.append(message)
+    print(f"{color.YELLOW}{color.BOLD}WARN{color.END} {message}")
+
+
+def integrityWarnings() -> list[str]:
+    return list(_integrityWarnings)
+
+
+def resetIntegrityWarnings() -> None:
+    _integrityWarnings.clear()
+
+
 def maskSecret(value: str) -> str:
     visibleChars = 4
     if len(value) <= visibleChars * 2:

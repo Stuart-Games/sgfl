@@ -216,6 +216,17 @@ def build(
             help="Skip rojo and reuse the existing Place.rbxl in the project root (it is not deleted afterwards).",
         ),
     ] = False,
+    failOnWarn: Annotated[
+        bool,
+        typer.Option(
+            "--fail-on-warn",
+            help=(
+                "Fail if anything warned that the output may not match the repo "
+                "(a blob that did not deserialize, an unwritable sidecar property, "
+                "an inferred version). Informational warnings are ignored."
+            ),
+        ),
+    ] = False,
     detailed: Annotated[
         bool,
         typer.Option("--detailed", "-d", help="Print detailed .env and HTTP diagnostics if an error occurs."),
@@ -242,7 +253,7 @@ def build(
             "DOWNLOAD_KEY",
             "EXECUTION_KEY",
         ],
-        fn=lambda: buildArtifact(env, outPath=out, noBuild=noBuild),
+        fn=lambda: buildArtifact(env, outPath=out, noBuild=noBuild, failOnWarn=failOnWarn),
     )
 
 
@@ -371,6 +382,16 @@ def publish(
             help="Roblox version type to publish as. Either 'Published' or 'Saved'.",
         ),
     ] = "Published",
+    failOnWarn: Annotated[
+        bool,
+        typer.Option(
+            "--fail-on-warn",
+            help=(
+                "Fail before uploading if anything warned that the build may not "
+                "match the repo. Informational warnings are ignored."
+            ),
+        ),
+    ] = False,
     jsonPath: Annotated[
         Optional[str],
         typer.Option("--json", help="Write a machine-readable result (per-place version numbers) to this path."),
@@ -399,6 +420,7 @@ def publish(
             versionType=versionType,
             expectPlaces=_splitNames(expectPlaces, "--expect-places"),
             jsonPath=jsonPath,
+            failOnWarn=failOnWarn,
         ),
     )
 
