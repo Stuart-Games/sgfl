@@ -779,6 +779,85 @@ def _resolveBuildTarget(
     return getEnvSafe("UNIVERSE_ID"), name, placeId, False
 
 
+PREFLIGHT_KEYS = ("PUBLISH_KEY", "DOWNLOAD_KEY", "EXECUTION_KEY")
+
+
+def preflight(env: str) -> dict:
+    """Check every credential is present and still alive, and nothing else.
+
+    Exists because an expired key is indistinguishable from a permissions
+    problem by the time the pipeline hits one: the place-version endpoint
+    answers "User unauthorized to update place", several minutes into a build,
+    naming neither the key nor the expiry. Run this first and a lapsed key
+    fails in seconds, named.
+
+    Deliberately does no work — no rojo, no execution task, no upload — so it
+    is free to run on every CI job and cannot itself be the thing that breaks.
+    """
+    announceStep(f"Loading environment file .env.{env}.")
+    loadEnvFile(env)
+
+    universeId, buildPlaceName, buildPlaceId, sharedBuild = _resolveBuildTarget()
+    announceStep(f"Checking credentials against universe {universeId}.")
+
+    def resolve(name: str) -> str:
+        # EXECUTION_KEY has a legacy ~/.sgfl/execution.key fallback, so reading
+        # the environment alone would report a working setup as MISSING.
+        if name == "EXECUTION_KEY":
+            try:
+                return cloud.getExecutionKey()
+            except SGFLError:
+                return ""
+        return (os.environ.get(name) or "").strip()
+
+    resolved = {name: resolve(name) for name in PREFLIGHT_KEYS}
+    missing = [name for name in PREFLIGHT_KEYS if not resolved[name]]
+    results = []
+    for name in PREFLIGHT_KEYS:
+        value = resolved[name]
+        if not value:
+            print(f"  - {name}: {color.RED}MISSING{color.END}")
+            continue
+        result = cloud.verifyKey(name, value, universeId)
+        results.append(result)
+        if result["alive"] is True:
+            label = f"{color.GREEN}OK{color.END}"
+        elif result["alive"] is False:
+            label = f"{color.RED}DEAD{color.END}"
+        else:
+            label = f"{color.YELLOW}UNKNOWN{color.END}"
+        print(f"  - {name}: {label} ({maskSecret(value)}) — {result['note']}")
+
+    dead = [r["key"] for r in results if r["alive"] is False]
+    if missing or dead:
+        details = []
+        if missing:
+            details.append("missing: " + ", ".join(missing))
+        if dead:
+            details.append("rejected by Roblox: " + ", ".join(dead))
+        raise SGFLError(
+            "Preflight failed — the pipeline would fail later, less clearly.",
+            details="; ".join(details),
+            suggestions=[
+                "A rejected key is usually an expired one. Check its status in "
+                "Creator Dashboard -> Open Cloud -> API Keys, regenerate, and update the secret.",
+                "Keys created together tend to expire together — check all three, not just the one named.",
+            ],
+        )
+
+    print(
+        f"{color.GREEN}{color.BOLD}SUCCESS{color.END} All credentials live. "
+        f"Build target: {buildPlaceName} ({buildPlaceId}) in universe {universeId}"
+        f"{' [shared]' if sharedBuild else ''}."
+    )
+    return {
+        "env": env,
+        "universeId": universeId,
+        "buildPlace": {"name": buildPlaceName, "placeId": buildPlaceId, "shared": sharedBuild},
+        "keys": results,
+    }
+
+
 def _enforceIntegrity(failOnWarn: bool) -> None:
     """Turn "the output may not match the repo" warnings into a failure.
 

@@ -219,6 +219,85 @@ def test_an_unavailable_listing_degrades_rather_than_raising(monkeypatch, capsys
     assert "Assets read permission" in capsys.readouterr().out
 
 
+# --- preflight -------------------------------------------------------------
+
+
+class FakeProbeResponse:
+    def __init__(self, status, text=""):
+        self.status_code = status
+        self.text = text
+
+
+@pytest.mark.parametrize(
+    "status,alive",
+    [
+        (200, True),
+        (403, True),  # alive, just not scoped for this read — good enough
+        (401, False),  # expired, revoked, or malformed
+        (500, None),  # no opinion
+    ],
+)
+def test_key_liveness_reads_only_the_status_code(monkeypatch, status, alive):
+    monkeypatch.setattr(
+        cloud.requests, "get", lambda *a, **k: FakeProbeResponse(status, "body")
+    )
+
+    assert cloud.verifyKey("PUBLISH_KEY", "k" * 20, "42")["alive"] is alive
+
+
+def test_key_liveness_survives_a_network_error(monkeypatch):
+    """One unreachable probe must not be reported as a dead key."""
+
+    def boom(*args, **kwargs):
+        raise cloud.requests.RequestException("no route")
+
+    monkeypatch.setattr(cloud.requests, "get", boom)
+
+    assert cloud.verifyKey("PUBLISH_KEY", "k" * 20, "42")["alive"] is None
+
+
+@pytest.fixture
+def preflightEnv(monkeypatch, isolatedCwd, cleanEnv):
+    (isolatedCwd / ".env.prod").write_text("UNIVERSE_ID=42\nPLACE_ID_MAIN=111\nPLACE_ID_BUILD=999\n")
+    for key in ("PUBLISH_KEY", "DOWNLOAD_KEY", "EXECUTION_KEY"):
+        monkeypatch.setenv(key, key[0].lower() * 20)
+    return monkeypatch
+
+
+def test_preflight_passes_when_every_key_is_alive(preflightEnv):
+    preflightEnv.setattr(cloud.requests, "get", lambda *a, **k: FakeProbeResponse(200))
+
+    result = operations.preflight("prod")
+
+    assert [r["alive"] for r in result["keys"]] == [True, True, True]
+    assert result["buildPlace"]["placeId"] == "999"
+
+
+def test_preflight_names_the_dead_key(preflightEnv):
+    """The failure this exists to replace named neither the key nor the cause."""
+
+    def probe(url, headers=None, **kwargs):
+        return FakeProbeResponse(401 if headers["x-api-key"].startswith("p") else 200)
+
+    preflightEnv.setattr(cloud.requests, "get", probe)
+
+    with pytest.raises(SGFLError) as excinfo:
+        operations.preflight("prod")
+
+    assert "PUBLISH_KEY" in excinfo.value.details
+    assert "DOWNLOAD_KEY" not in excinfo.value.details
+
+
+def test_preflight_reports_a_missing_key(preflightEnv):
+    preflightEnv.delenv("EXECUTION_KEY")
+    preflightEnv.setattr(cloud.requests, "get", lambda *a, **k: FakeProbeResponse(200))
+
+    with pytest.raises(SGFLError) as excinfo:
+        operations.preflight("prod")
+
+    assert "missing: EXECUTION_KEY" in excinfo.value.details
+
+
 # --- integrity warnings ----------------------------------------------------
 
 
