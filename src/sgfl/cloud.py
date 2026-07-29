@@ -36,6 +36,7 @@ from .util import (
     getAbsoluteFileURI,
     getFileURI,
     maskSecret,
+    warn,
 )
 
 CLOUD_BASE = "https://apis.roblox.com/cloud/v2"
@@ -424,11 +425,11 @@ def listPlaceVersions(placeId: str, downloadKey: str) -> Optional[list[int]]:
             params={"maxPageSize": VERSION_PAGE_SIZE},
         )
     except SGFLError as err:
-        print(
-            f"{color.YELLOW}{color.BOLD}WARN{color.END} "
+        warn(
             f"Could not list place versions ({err.message.rstrip('.')}). "
             f"Grant DOWNLOAD_KEY the Assets read permission on this universe to "
-            f"identify the applied version instead of inferring it."
+            f"identify the applied version instead of inferring it.",
+            integrity=True,
         )
         return None
 
@@ -747,7 +748,7 @@ def runProjectionSave(
     manifest, files = unpackContainer(task["binaryOutput"])
     placeVersion = manifest["placeVersion"]
     for warning in manifest.get("warnings", []):
-        print(f"{color.YELLOW}{color.BOLD}WARN{color.END} {warning}")
+        warn(warning, integrity=True)
 
     results = task.get("output", {}).get("results", [])
     anchors = results[0].get("anchors", {}) if results else {}
@@ -768,7 +769,7 @@ def runProjectionSave(
     for problem in problems:
         if "AttributesSerialize: not found" in problem:
             continue  # services with no attributes simply have no chunk
-        print(f"{color.YELLOW}{color.BOLD}WARN{color.END} sidecar: {problem}")
+        warn(f"sidecar: {problem}", integrity=True)
 
     # anchor canary: the binary decoder must agree with the engine bit-exactly
     canaryFailures = []
@@ -805,9 +806,9 @@ def runProjectionSave(
                 continue
             values = extractedEntry["values"]
             if len(values) != 1:
-                print(
-                    f"{color.YELLOW}{color.BOLD}WARN{color.END} "
-                    f"{cls}.{prop} has {len(values)} instances; sidecar expects a singleton — skipped"
+                warn(
+                    f"{cls}.{prop} has {len(values)} instances; sidecar expects a singleton — skipped",
+                    integrity=True,
                 )
                 continue
             sidecarLines.append(f"{prop} = {sidecar.renderSidecarValue(extractedEntry['typeId'], values[0])}")
@@ -1169,10 +1170,10 @@ def _postSaveVersion(
                     "never contending for version numbers.",
                 ],
             )
-        print(
-            f"{color.YELLOW}{color.BOLD}WARN{color.END} "
+        warn(
             f"Versions {', '.join(str(v) for v in newer)} all landed on this place since "
-            f"base {baseVersion} — assuming {baseVersion + 1} is ours."
+            f"base {baseVersion} — assuming {baseVersion + 1} is ours.",
+            integrity=True,
         )
         return baseVersion + 1
 
@@ -1252,7 +1253,10 @@ def buildFinalPlace(
     results = task.get("output", {}).get("results", [])
     applyResult = results[0] if results else {}
     for warning in applyResult.get("warnings", []):
-        print(f"{color.YELLOW}{color.BOLD}WARN{color.END} {warning}")
+        # The engine only warns here when something it was given did not make
+        # it into the place — a blob it could not deserialize, an entry it
+        # could not resolve. Always integrity-bearing.
+        warn(warning, integrity=True)
     if applyResult.get("failedRefs"):
         raise SGFLError(
             "Apply left unresolved instance references — aborting before upload.",
@@ -1301,7 +1305,7 @@ def buildFinalPlace(
     if patches:
         patched, applied, problems, omitted = sidecar.patchFile(finalBytes, patches)
         for problem in problems + omitted:
-            print(f"{color.YELLOW}{color.BOLD}WARN{color.END} sidecar patch: {problem}")
+            warn(f"sidecar patch: {problem}", integrity=True)
         # `omitted` properties are not failures. The engine chose not to
         # serialize them, there is no chunk to rewrite and no way to add one,
         # so aborting would leave the project permanently unbuildable while

@@ -219,6 +219,58 @@ def test_an_unavailable_listing_degrades_rather_than_raising(monkeypatch, capsys
     assert "Assets read permission" in capsys.readouterr().out
 
 
+# --- integrity warnings ----------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def freshWarnings():
+    util.resetIntegrityWarnings()
+    yield
+    util.resetIntegrityWarnings()
+
+
+def test_only_integrity_warnings_are_recorded(capsys):
+    util.warn("just so you know")
+    util.warn("a blob did not deserialize", integrity=True)
+
+    assert util.integrityWarnings() == ["a blob did not deserialize"]
+    # both still reach the user
+    assert capsys.readouterr().out.count("WARN") == 2
+
+
+def test_fail_on_warn_is_off_by_default():
+    util.warn("a blob did not deserialize", integrity=True)
+
+    operations._enforceIntegrity(False)  # must not raise
+
+
+def test_fail_on_warn_trips_on_integrity_warnings():
+    """The LFS case: three blobs skipped, every one a warning, build otherwise
+    on course to succeed having dropped most of the game."""
+    util.warn("Workspace: blob deserialize failed: Invalid XML", integrity=True)
+
+    with pytest.raises(SGFLError) as excinfo:
+        operations._enforceIntegrity(True)
+
+    assert "blob deserialize failed" in excinfo.value.details
+
+
+def test_fail_on_warn_ignores_informational_warnings():
+    util.warn(".env.testing not found — continuing with the process environment alone.")
+
+    operations._enforceIntegrity(True)  # must not raise
+
+
+def test_a_build_starts_from_a_clean_warning_slate(stubbedBuild):
+    """Warnings from an earlier command in the same process must not fail the
+    next one."""
+    util.warn("stale warning from before", integrity=True)
+
+    operations.buildArtifact("prod", outPath="dist/place.rbxl", failOnWarn=True)
+
+    assert util.integrityWarnings() == []
+
+
 # --- authorization ---------------------------------------------------------
 
 

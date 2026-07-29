@@ -173,6 +173,8 @@ sgfl build prod --out dist/place.rbxl
 sgfl upload dist/place.rbxl prod --expect-places main,lobby --json dist/report.json
 ```
 
+Pass `--fail-on-warn` in automation. sgfl warns and continues when part of a build did not make it in — a blob it could not deserialize, a sidecar property it could not write, a version it had to infer — because a human watching can judge for themselves. Unattended there is nobody to judge, and those are exactly the warnings that do not stop the build: a checkout missing its git-lfs objects turns every blob entry into a pointer stub, the engine skips them all, and the run goes green having dropped most of the game. Informational warnings are unaffected.
+
 `build` does the expensive, rate-limited half — rojo, the cloud apply, the sidecar patch — against the scratch build place and writes the finished bytes to disk. `upload` promotes those exact bytes and nothing else, so what you validated is what ships, a partial failure is safe to re-run, and promoting the same artifact to a second environment costs no execution task.
 
 Set `SGFL_CI=1` for automated runs. That swaps the interactive confirmation for `--expect-places`: the upload aborts unless the env file resolves to exactly the places you named, so adding a `PLACE_ID_<NAME>` can't silently widen what a workflow publishes to. It also makes `PLACE_ID_BUILD` mandatory and lets a missing `.env.<env>` fall back to the process environment.
