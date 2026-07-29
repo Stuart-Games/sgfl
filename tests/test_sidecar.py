@@ -115,7 +115,7 @@ def test_patch_file_round_trips_value():
         instChunk(0, "Workspace", 1),
         propChunk(0, "Gravity", 0x04, [196.2]),
     )
-    patched, applied, problems = sidecar.patchFile(data, {("Workspace", "Gravity"): [-99.0]})
+    patched, applied, problems, _ = sidecar.patchFile(data, {("Workspace", "Gravity"): [-99.0]})
     assert problems == []
     assert applied == {("Workspace", "Gravity")}
 
@@ -129,7 +129,7 @@ def test_patch_file_preserves_untouched_chunks():
         propChunk(0, "Gravity", 0x04, [196.2]),
         propChunk(0, "Name", 0x01, [b"Workspace"]),
     )
-    patched, applied, _ = sidecar.patchFile(data, {("Workspace", "Gravity"): [1.0]})
+    patched, applied, _, _ = sidecar.patchFile(data, {("Workspace", "Gravity"): [1.0]})
     results, _ = sidecar.extract(patched, {("Workspace", "Gravity"): 0x04, ("Workspace", "Name"): 0x01})
     assert results[("Workspace", "Name")]["values"][0] == b"Workspace"
 
@@ -139,7 +139,7 @@ def test_patch_file_type_mismatch_not_applied():
         instChunk(0, "Workspace", 1),
         propChunk(0, "Gravity", 0x02, [True]),  # file has Bool, ALLOWLIST says Float32
     )
-    patched, applied, problems = sidecar.patchFile(data, {("Workspace", "Gravity"): [1.0]})
+    patched, applied, problems, _ = sidecar.patchFile(data, {("Workspace", "Gravity"): [1.0]})
     assert applied == set()
     assert any("type changed" in p for p in problems)
     assert patched == data
@@ -150,20 +150,35 @@ def test_patch_file_count_mismatch_not_applied():
         instChunk(0, "Workspace", 2),
         propChunk(0, "Gravity", 0x04, [196.2, 196.2]),
     )
-    patched, applied, problems = sidecar.patchFile(data, {("Workspace", "Gravity"): [1.0]})
+    patched, applied, problems, _ = sidecar.patchFile(data, {("Workspace", "Gravity"): [1.0]})
     assert applied == set()
     assert any("value count mismatch" in p for p in problems)
 
 
-def test_patch_file_missing_prop_reported():
+def test_an_unserialized_property_is_reported_but_not_fatal():
+    """The class is in the file, so the subtree built — the engine just left
+    this property at its default and omitted it. There is no chunk to rewrite
+    and no way to insert one, so failing would make the project permanently
+    unbuildable while protecting nothing."""
     data = place(instChunk(0, "Workspace", 1))
-    _, applied, problems = sidecar.patchFile(data, {("Workspace", "Gravity"): [1.0]})
+    _, applied, problems, omitted = sidecar.patchFile(data, {("Workspace", "Gravity"): [1.0]})
     assert applied == set()
-    assert any("no PROP chunk in file" in p for p in problems)
+    assert problems == []
+    assert any("engine default" in o for o in omitted)
+
+
+def test_a_missing_class_is_still_fatal():
+    """Nothing of the class is in the file at all. That is structural — what
+    the entry files describe did not survive the apply — not a default."""
+    data = place(instChunk(0, "Lighting", 1))
+    _, applied, problems, omitted = sidecar.patchFile(data, {("Workspace", "Gravity"): [1.0]})
+    assert applied == set()
+    assert omitted == []
+    assert any("absent from the file entirely" in p for p in problems)
 
 
 def test_patch_file_rejects_bad_magic():
-    patched, applied, problems = sidecar.patchFile(b"nope", {("Workspace", "Gravity"): [1.0]})
+    patched, applied, problems, _ = sidecar.patchFile(b"nope", {("Workspace", "Gravity"): [1.0]})
     assert patched == b"nope"
     assert applied == set()
     assert "magic mismatch" in problems[0]

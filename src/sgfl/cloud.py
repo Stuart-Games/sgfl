@@ -1299,17 +1299,24 @@ def buildFinalPlace(
         patches[(item["className"], item["prop"])] = [value]
 
     if patches:
-        patched, applied, problems = sidecar.patchFile(finalBytes, patches)
-        for problem in problems:
+        patched, applied, problems, omitted = sidecar.patchFile(finalBytes, patches)
+        for problem in problems + omitted:
             print(f"{color.YELLOW}{color.BOLD}WARN{color.END} sidecar patch: {problem}")
-        if len(applied) < len(patches):
-            missing = sorted(f"{c}.{p}" for c, p in set(patches) - applied)
+        # `omitted` properties are not failures. The engine chose not to
+        # serialize them, there is no chunk to rewrite and no way to add one,
+        # so aborting would leave the project permanently unbuildable while
+        # protecting nothing. `problems` still abort.
+        unwritable = sorted(f"{c}.{p}" for c, p in set(patches) - applied) if problems else []
+        if unwritable:
             raise SGFLError(
                 "Some sidecar properties could not be patched — aborting before upload.",
-                details="Unpatched: " + ", ".join(missing),
+                details="Unpatched: " + ", ".join(unwritable),
                 suggestions=["Run sgfl save to refresh entry files, then retry."],
             )
-        announceStep(f"Patched {len(applied)} sidecar properties into the final place file.")
+        announceStep(
+            f"Patched {len(applied)} sidecar properties into the final place file"
+            + (f" ({len(omitted)} not serialized by the engine)." if omitted else ".")
+        )
         finalBytes = patched
 
     return finalBytes
