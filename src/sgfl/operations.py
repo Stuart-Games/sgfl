@@ -1,5 +1,6 @@
 import getpass
 import hashlib
+import socket
 import sys
 import requests
 import typer
@@ -193,7 +194,77 @@ def _runRojoBuild():
     )
 
 
-def startPlace(pull: bool):
+# The Rojo plugin's connect dialog defaults to this port, so it is also the
+# default `rojo serve` listens on when neither the CLI nor the project file
+# says otherwise.
+DEFAULT_ROJO_PORT = 34872
+ROJO_PORT_SCAN_LIMIT = 10
+
+
+def _configuredRojoPort() -> int:
+    """The port `rojo serve` would pick on its own: default.project.json's
+    servePort if pinned there, else Rojo's built-in default."""
+    try:
+        with open("default.project.json", "r", encoding="utf-8") as f:
+            servePort = json.load(f).get("servePort")
+        if isinstance(servePort, int):
+            return servePort
+    except (OSError, ValueError):
+        pass  # missing/unreadable project file fails later, in rojo itself
+    return DEFAULT_ROJO_PORT
+
+
+def _portIsFree(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind(("127.0.0.1", port))
+        except OSError:
+            return False
+    return True
+
+
+def _resolveRojoServePort(requestedPort: Optional[int]) -> Optional[int]:
+    """Decide which port to hand `rojo serve`.
+
+    An explicit --port is used exactly as given — no scanning — so a taken
+    port fails loudly in rojo rather than silently landing somewhere else.
+
+    With no flag, scan upward from the configured port for a free one. The
+    bump must be LOUD, never silent: the Rojo plugin inside Studio defaults
+    to the standard port, so a quietly-moved server would leave this Studio
+    instance syncing against the *other* project's rojo serve.
+
+    Returns None when the configured port is free and nothing was requested,
+    so the plain `rojo serve` invocation (which respects any project-file
+    servePort) stays byte-identical to previous versions.
+    """
+    if requestedPort is not None:
+        return requestedPort
+
+    basePort = _configuredRojoPort()
+    for offset in range(ROJO_PORT_SCAN_LIMIT):
+        candidate = basePort + offset
+        if _portIsFree(candidate):
+            if offset == 0:
+                return None
+            warn(
+                f"Port {basePort} is already in use (another rojo serve or sgfl start?). "
+                f"Serving on port {candidate} instead — set the port to {candidate} in the "
+                f"Rojo plugin's connect dialog for THIS Studio instance before connecting."
+            )
+            return candidate
+
+    raise SGFLError(
+        f"No free port found for rojo serve (tried {basePort}-{basePort + ROJO_PORT_SCAN_LIMIT - 1}).",
+        suggestions=[
+            "Close unused rojo serve processes or Studio sessions.",
+            "Pass an explicit port with sgfl start --port <port>.",
+        ],
+    )
+
+
+def startPlace(pull: bool, servePort: Optional[int] = None):
     announceStep("Checking environment configuration for publish flow.")
     placeId = getEnvSafe("PLACE_ID")
     universeId = getEnvSafe("UNIVERSE_ID")
@@ -272,9 +343,15 @@ def startPlace(pull: bool):
         captureOutput=False,
         shell=True,
     )
-    announceStep("Starting Rojo server.")
+    resolvedPort = _resolveRojoServePort(servePort)
+    serveCommand = ["rojo", "serve"]
+    if resolvedPort is not None:
+        serveCommand += ["--port", str(resolvedPort)]
+        announceStep(f"Starting Rojo server on port {resolvedPort}.")
+    else:
+        announceStep("Starting Rojo server.")
     runCommand(
-        ["rojo", "serve"],
+        serveCommand,
         suggestions=[
             "Install Rojo or ensure it is available on PATH.",
             "Run rojo serve manually to inspect detailed setup issues.",

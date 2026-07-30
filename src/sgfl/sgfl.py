@@ -81,6 +81,15 @@ def start(
     pull: Annotated[
         bool, typer.Option("--pull", "-p", help="Whether to git pull on start.")
     ] = False,
+    port: Annotated[
+        Optional[int],
+        typer.Option(
+            "--port",
+            help="Port for rojo serve, used exactly as given. Without it, the next free port "
+            "upward from the default is picked automatically (with a loud notice) when the "
+            "default is taken — e.g. by another sgfl start's rojo serve.",
+        ),
+    ] = None,
     detailed: Annotated[
         bool,
         typer.Option(
@@ -115,7 +124,7 @@ def start(
             "EXECUTION_KEY",
             "USER_ID",
         ],
-        fn=lambda: startPlace(pull),
+        fn=lambda: startPlace(pull, servePort=port),
     )
 
 
