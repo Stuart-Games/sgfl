@@ -582,10 +582,14 @@ def configListCmd(
 
 def configSetCmd(
     key: Annotated[str, typer.Argument(help="Preference key, e.g. EDITOR_COMMAND.")],
+    # Variadic on purpose: `sgfl config set EDITOR_COMMAND zed .` should just
+    # work — the words are joined with spaces, so multi-word commands need no
+    # quoting and there is no "Got unexpected extra argument" dead end.
     value: Annotated[
-        str,
+        list[str],
         typer.Argument(
-            help="Value to store. For EDITOR_COMMAND: a shell command ('zed .'), or 'none' to disable the editor launch."
+            help="Value to store; multiple words are joined, so no quoting needed. "
+            "For EDITOR_COMMAND: a shell command (zed .), or 'none' to disable the editor launch."
         ),
     ],
     detailed: Annotated[
@@ -602,7 +606,7 @@ def configSetCmd(
         detailed=detailed,
         pullEnabled=False,
         envDiagnosticKeys=[],
-        fn=lambda: configSet(key, value),
+        fn=lambda: configSet(key, " ".join(value)),
     )
 
 

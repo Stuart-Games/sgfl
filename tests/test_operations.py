@@ -330,3 +330,18 @@ def test_config_list_flags_an_environment_override(isolatedConfigOps, monkeypatc
     operations.configList()
 
     assert "overrides the config file" in capsys.readouterr().out
+
+
+def test_config_set_cli_accepts_unquoted_multiword_values(isolatedConfigOps, monkeypatch):
+    """`sgfl config set EDITOR_COMMAND zed .` must store 'zed .' — not die on
+    'Got unexpected extra argument (.)'. The value is variadic and joined."""
+    from typer.testing import CliRunner
+
+    from sgfl import util
+    from sgfl.cli import app
+
+    monkeypatch.setenv("SGFL_NO_UPDATE_CHECK", "1")
+    result = CliRunner().invoke(app, ["config", "set", "EDITOR_COMMAND", "zed", "."])
+
+    assert result.exit_code == 0
+    assert util.readConfigFile() == {"EDITOR_COMMAND": "zed ."}
