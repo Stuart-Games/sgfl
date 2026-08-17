@@ -231,3 +231,117 @@ def test_sync_wally_type_fixup_failure_warns_but_keeps_the_install(isolatedCwd, 
     calls.clear()
     operations._syncWallyPackages()
     assert calls == []
+
+
+# --- editor launch & config -----------------------------------------------
+
+
+def test_launch_editor_skips_when_disabled(monkeypatch, capsys):
+    monkeypatch.setenv("EDITOR_COMMAND", "none")
+    monkeypatch.setattr(
+        operations, "runCommand", lambda *a, **k: pytest.fail("editor should not launch")
+    )
+
+    operations._launchEditor()
+
+    assert "Skipping editor launch" in capsys.readouterr().out
+
+
+def test_launch_editor_defaults_to_vscode(monkeypatch):
+    monkeypatch.delenv("EDITOR_COMMAND", raising=False)
+    calls = []
+    monkeypatch.setattr(operations, "runCommand", lambda command, **k: calls.append(command))
+
+    operations._launchEditor()
+
+    assert calls == ["code ."]
+
+
+def test_launch_editor_runs_a_custom_command(monkeypatch):
+    monkeypatch.setenv("EDITOR_COMMAND", "zed ~/workspaces/game.code-workspace")
+    calls = []
+    monkeypatch.setattr(operations, "runCommand", lambda command, **k: calls.append(command))
+
+    operations._launchEditor()
+
+    assert calls == ["zed ~/workspaces/game.code-workspace"]
+
+
+def test_launch_editor_failure_warns_but_does_not_abort(monkeypatch, capsys):
+    """The editor is a convenience — a broken command must not stop the flow
+    before rojo serve."""
+    monkeypatch.delenv("EDITOR_COMMAND", raising=False)
+
+    def boom(*args, **kwargs):
+        raise SGFLError("Missing dependency: code")
+
+    monkeypatch.setattr(operations, "runCommand", boom)
+
+    operations._launchEditor()
+
+    assert "Could not launch the editor" in capsys.readouterr().out
+
+
+@pytest.fixture
+def isolatedConfigOps(tmp_path, monkeypatch):
+    from sgfl import util
+
+    configPath = str(tmp_path / "config")
+    for module in (util, operations):
+        monkeypatch.setattr(module, "CONFIG_PATH", configPath)
+    monkeypatch.setattr(util, "CREDENTIALS_DIR", str(tmp_path))
+    return configPath
+
+
+def test_config_set_and_list_round_trip(isolatedConfigOps, monkeypatch, capsys):
+    monkeypatch.delenv("EDITOR_COMMAND", raising=False)
+    operations.configSet("editor_command", "none")
+
+    operations.configList()
+
+    out = capsys.readouterr().out
+    assert "EDITOR_COMMAND" in out
+    assert "value=none" in out
+
+
+def test_config_set_rejects_unknown_keys(isolatedConfigOps):
+    """Typos must fail loud, not write a key nothing reads."""
+    with pytest.raises(SGFLError) as excinfo:
+        operations.configSet("EDIT_COMMAND", "zed .")
+
+    assert "EDITOR_COMMAND" in " ".join(excinfo.value.suggestions)
+
+
+def test_config_unset_removes_the_key(isolatedConfigOps):
+    from sgfl import util
+
+    operations.configSet("EDITOR_COMMAND", "none")
+    operations.configUnset("EDITOR_COMMAND")
+
+    assert util.readConfigFile() == {}
+
+
+def test_config_list_flags_an_environment_override(isolatedConfigOps, monkeypatch, capsys):
+    """The file is the weakest layer — the listing must say when the shell
+    environment will win anyway, or a 'set' that changes nothing looks broken."""
+    operations.configSet("EDITOR_COMMAND", "zed .")
+    monkeypatch.setenv("EDITOR_COMMAND", "none")
+
+    operations.configList()
+
+    assert "overrides the config file" in capsys.readouterr().out
+
+
+def test_config_set_cli_accepts_unquoted_multiword_values(isolatedConfigOps, monkeypatch):
+    """`sgfl config set EDITOR_COMMAND zed .` must store 'zed .' — not die on
+    'Got unexpected extra argument (.)'. The value is variadic and joined."""
+    from typer.testing import CliRunner
+
+    from sgfl import util
+    from sgfl.cli import app
+
+    monkeypatch.setenv("SGFL_NO_UPDATE_CHECK", "1")
+    result = CliRunner().invoke(app, ["config", "set", "EDITOR_COMMAND", "zed", "."])
+
+    assert result.exit_code == 0
+    assert util.readConfigFile() == {"EDITOR_COMMAND": "zed ."}

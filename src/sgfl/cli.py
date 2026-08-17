@@ -14,6 +14,9 @@ from .sgfl import (
     update,
     authLoginCmd,
     authStatusCmd,
+    configListCmd,
+    configSetCmd,
+    configUnsetCmd,
 )
 
 # Legacy Windows consoles decode stdout as cp1252, which cannot encode the
@@ -40,6 +43,15 @@ authApp = typer.Typer(
 authApp.command("login")(authLoginCmd)
 authApp.command("status")(authStatusCmd)
 app.add_typer(authApp, name="auth")
+
+configApp = typer.Typer(
+    pretty_exceptions_enable=False,
+    help="Manage per-developer preferences stored at ~/.sgfl/config (not secrets — see sgfl auth for those).",
+)
+configApp.command("list")(configListCmd)
+configApp.command("set")(configSetCmd)
+configApp.command("unset")(configUnsetCmd)
+app.add_typer(configApp, name="config")
 
 if __name__ == "__main__":
     app()

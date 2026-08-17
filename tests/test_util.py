@@ -135,3 +135,66 @@ def test_confirm_publish_refuses_non_tty(monkeypatch):
     monkeypatch.setattr(util.sys.stdin, "isatty", lambda: False)
     with pytest.raises(SGFLError, match="non-interactive"):
         util.confirmPublish("prod", ["some summary line"])
+
+
+# --- per-developer config (~/.sgfl/config) --------------------------------
+
+
+@pytest.fixture
+def isolatedConfig(tmp_path, monkeypatch):
+    configPath = str(tmp_path / "config")
+    monkeypatch.setattr(util, "CONFIG_PATH", configPath)
+    monkeypatch.setattr(util, "CREDENTIALS_DIR", str(tmp_path))
+    return configPath
+
+
+def test_resolve_editor_command_defaults_to_vscode(monkeypatch):
+    monkeypatch.delenv("EDITOR_COMMAND", raising=False)
+    assert util.resolveEditorCommand() == "code ."
+
+
+@pytest.mark.parametrize("value", ["none", "NONE", "None", "", "   "])
+def test_resolve_editor_command_disabled_values(monkeypatch, value):
+    monkeypatch.setenv("EDITOR_COMMAND", value)
+    assert util.resolveEditorCommand() is None
+
+
+def test_resolve_editor_command_custom_command(monkeypatch):
+    monkeypatch.setenv("EDITOR_COMMAND", "  zed .  ")
+    assert util.resolveEditorCommand() == "zed ."
+
+
+def test_config_file_round_trip(isolatedConfig):
+    util.writeConfigFile({"EDITOR_COMMAND": "none"})
+    assert util.readConfigFile() == {"EDITOR_COMMAND": "none"}
+
+
+def test_read_config_file_missing_returns_empty(isolatedConfig):
+    assert util.readConfigFile() == {}
+
+
+def test_load_config_is_the_weakest_layer(isolatedConfig, monkeypatch):
+    """A value already in the environment (shell, credentials) must win over
+    the config file — config holds per-developer defaults, not overrides."""
+    util.writeConfigFile({"EDITOR_COMMAND": "zed ."})
+    monkeypatch.setenv("EDITOR_COMMAND", "none")
+
+    util.loadConfig()
+
+    assert os.environ["EDITOR_COMMAND"] == "none"
+
+
+def test_load_config_fills_unset_keys(isolatedConfig, monkeypatch):
+    # A sandboxed environ: dotenv writes a key monkeypatch.delenv never saw,
+    # which would otherwise leak past this test into the process env.
+    monkeypatch.setattr(os, "environ", dict(os.environ))
+    os.environ.pop("EDITOR_COMMAND", None)
+    util.writeConfigFile({"EDITOR_COMMAND": "zed ."})
+
+    util.loadConfig()
+
+    assert os.environ["EDITOR_COMMAND"] == "zed ."
+
+
+def test_format_command_passes_string_commands_through():
+    assert util._formatCommand("zed ~/my workspace") == "zed ~/my workspace"
