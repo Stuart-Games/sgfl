@@ -1,5 +1,6 @@
 import getpass
 import hashlib
+import shutil
 import socket
 import sys
 import requests
@@ -182,7 +183,114 @@ def _checkForLegacyAssets(assetTable: dict):
         )
 
 
+# Wally dependency sync (v2.10.0). `default.project.json` mounts Packages/, so
+# a rojo build on a fresh clone (or after a wally.toml change someone else
+# pushed) is silently wrong until `wally install` runs. Following the
+# Cargo/Go model, dependency installation is simply a phase of every build —
+# no prompt: `wally install` is deterministic given wally.lock, local, and
+# reversible, so there is no decision for a human to make. Projects without a
+# wally.toml are untouched.
+WALLY_MANIFEST = "wally.toml"
+WALLY_LOCKFILE = "wally.lock"
+# Every directory wally can install into (shared / server / dev realms).
+WALLY_PACKAGE_DIRS = ("Packages", "ServerPackages", "DevPackages")
+WALLY_STAMP_NAME = ".sgfl-wally-stamp"
+
+
+def _wallyStamp() -> str:
+    digest = hashlib.sha256()
+    for name in (WALLY_MANIFEST, WALLY_LOCKFILE):
+        try:
+            with open(name, "rb") as f:
+                digest.update(f.read())
+        except OSError:
+            digest.update(b"<missing>")
+        digest.update(b"\x00")
+    return digest.hexdigest()
+
+
+def _wallyPackagesFresh() -> bool:
+    """True iff the installed packages were produced from the current
+    wally.toml + wally.lock. `wally install` is not incremental — it rebuilds
+    the package directories from scratch every run — so this stamp check is
+    what keeps the already-up-to-date case at zero subprocesses."""
+    expected = _wallyStamp()
+    matched = False
+    for dirName in WALLY_PACKAGE_DIRS:
+        if not os.path.isdir(dirName):
+            continue
+        try:
+            with open(os.path.join(dirName, WALLY_STAMP_NAME), "r", encoding="utf-8") as f:
+                stamp = f.read().strip()
+        except OSError:
+            return False
+        if stamp != expected:
+            return False
+        matched = True
+    return matched
+
+
+def _writeWallyStamps():
+    # Recompute rather than reuse: `wally install` may have rewritten
+    # wally.lock (first install, or a manifest edit that re-resolved).
+    stamp = _wallyStamp()
+    for dirName in WALLY_PACKAGE_DIRS:
+        if os.path.isdir(dirName):
+            with open(os.path.join(dirName, WALLY_STAMP_NAME), "w", encoding="utf-8") as f:
+                f.write(stamp + "\n")
+
+
+def _syncWallyPackages():
+    if not os.path.exists(WALLY_MANIFEST):
+        return
+    if _wallyPackagesFresh():
+        return
+
+    if shutil.which("wally") is None and os.path.exists("rokit.toml"):
+        runCommand(
+            ["rokit", "install"],
+            step="Installing project toolchain via Rokit (wally not found on PATH).",
+            suggestions=["Run 'rokit install' manually to see detailed errors."],
+        )
+
+    installCommand = ["wally", "install"]
+    if isCiMode():
+        # In CI a stale lockfile must fail loudly, never silently re-resolve
+        # to different versions than the ones developers tested against.
+        installCommand.append("--locked")
+    runCommand(
+        installCommand,
+        step="Installing wally packages (dependencies missing or out of date).",
+        suggestions=[
+            "Install wally or ensure it is available on PATH (rokit add wally).",
+            "Run 'wally install' manually to see detailed resolution errors.",
+        ],
+    )
+
+    # Re-export package types for luau-lsp. A failure here leaves the build
+    # itself correct (packages are installed), so it warns instead of aborting.
+    if shutil.which("wally-package-types") is None:
+        announceStep("Skipping package type fixup (wally-package-types not on PATH).")
+    else:
+        try:
+            runCommand(
+                ["rojo", "sourcemap", "default.project.json", "--output", "sourcemap.json"],
+                step="Generating sourcemap for package type fixup.",
+            )
+            for dirName in WALLY_PACKAGE_DIRS:
+                if os.path.isdir(dirName):
+                    runCommand(
+                        ["wally-package-types", "--sourcemap", "sourcemap.json", dirName],
+                        step=f"Fixing package type re-exports in {dirName}/.",
+                    )
+        except SGFLError as err:
+            warn(f"Package type fixup failed: {err.message} Packages are installed; types may be incomplete.")
+
+    _writeWallyStamps()
+
+
 def _runRojoBuild():
+    _syncWallyPackages()
     runCommand(
         ["rojo", "build", "default.project.json", "-o", "Place.rbxl"],
         step="Compiling scripts via Rojo into Place.rbxl.",
