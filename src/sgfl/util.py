@@ -11,7 +11,7 @@ import dotenv
 import requests
 import typer
 from importlib.metadata import version as _pkgVersion, PackageNotFoundError
-from typing import Optional
+from typing import Optional, Union
 
 
 def _colorEnabled() -> bool:
@@ -136,7 +136,10 @@ def _toolDiagnosticsForTask(taskName: Optional[str], pullEnabled: bool) -> list[
     requiredTools: list[str] = []
 
     if taskName == "start":
-        requiredTools.extend(["rojo", "code"])
+        requiredTools.append("rojo")
+        editorCommand = resolveEditorCommand()
+        if editorCommand:
+            requiredTools.append(editorCommand.split()[0])
         if pullEnabled:
             requiredTools.append("git")
     elif taskName == "preflight":
@@ -257,12 +260,16 @@ def _clipOutput(text: Optional[str], maxChars: int = 2000) -> Optional[str]:
     return trimmed[:maxChars] + "\n...[output truncated]"
 
 
-def _formatCommand(command: list[str]) -> str:
+def _formatCommand(command: Union[list, str]) -> str:
+    if isinstance(command, str):
+        return command
     return " ".join(shlex.quote(part) for part in command)
 
 
 def runCommand(
-    command: list[str],
+    # A plain string is passed through to the shell verbatim (requires
+    # shell=True) — used for user-supplied commands like EDITOR_COMMAND.
+    command: Union[list, str],
     step: Optional[str] = None,
     suggestions: Optional[list[str]] = None,
     captureOutput: bool = True,
@@ -451,6 +458,35 @@ CREDENTIALS_DIR = os.path.expanduser("~/.sgfl")
 CREDENTIALS_PATH = os.path.join(CREDENTIALS_DIR, "credentials")
 CREDENTIAL_KEYS = ["PUBLISH_KEY", "DOWNLOAD_KEY", "EXECUTION_KEY", "USER_ID"]
 
+# Per-developer preferences (v2.11.0) — not secrets, not project config, so
+# they live in their own file managed by `sgfl config` rather than squatting
+# in credentials. Loaded as the WEAKEST env layer: credentials, .env files,
+# and the real process environment all override it. Key -> help text; keys
+# outside this table are rejected by `sgfl config set` so typos fail loud.
+CONFIG_PATH = os.path.join(CREDENTIALS_DIR, "config")
+CONFIG_KEYS = {
+    "EDITOR_COMMAND": "Command sgfl start runs to open your editor. 'none' disables the launch; unset means the default ('code .').",
+}
+
+EDITOR_COMMAND_KEY = "EDITOR_COMMAND"
+DEFAULT_EDITOR_COMMAND = "code ."
+
+
+def resolveEditorCommand() -> Optional[str]:
+    """The command `sgfl start` uses to open an editor, or None when disabled.
+
+    Unset means the historical default (VS Code). 'none' (any case) or an
+    empty value disables the launch. Anything else is run as a shell command,
+    so a per-developer editor (zed, subl, a wrapper script) needs no project
+    change and no flag."""
+    value = os.environ.get(EDITOR_COMMAND_KEY)
+    if value is None:
+        return DEFAULT_EDITOR_COMMAND
+    trimmed = value.strip()
+    if trimmed == "" or trimmed.lower() == "none":
+        return None
+    return trimmed
+
 UPDATE_CACHE_PATH = os.path.join(CREDENTIALS_DIR, "update_check.json")
 UPDATE_CHECK_TTL_SECONDS = 24 * 60 * 60
 UPDATE_PYPROJECT_URL = (
@@ -567,6 +603,39 @@ def loadCredentials() -> bool:
         return False
     dotenv.load_dotenv(CREDENTIALS_PATH, override=False)
     return True
+
+
+def loadConfig() -> bool:
+    """Load ~/.sgfl/config as the weakest layer: override=False plus being
+    loaded after credentials means anything already set — shell environment
+    or credentials — wins over a config-file value."""
+    if not os.path.exists(CONFIG_PATH):
+        return False
+    dotenv.load_dotenv(CONFIG_PATH, override=False)
+    return True
+
+
+def readConfigFile() -> dict:
+    values: dict[str, str] = {}
+    if os.path.exists(CONFIG_PATH):
+        with open(CONFIG_PATH, "r") as f:
+            for raw in f:
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, val = line.partition("=")
+                values[key.strip()] = val.strip()
+    return values
+
+
+def writeConfigFile(values: dict) -> str:
+    os.makedirs(CREDENTIALS_DIR, exist_ok=True)
+    ordered = [key for key in CONFIG_KEYS if key in values]
+    ordered += [key for key in values if key not in ordered]
+    lines = [f"{key}={values[key]}" for key in ordered]
+    with open(CONFIG_PATH, "w") as f:
+        f.write("\n".join(lines) + ("\n" if lines else ""))
+    return CONFIG_PATH
 
 
 def loadBaseEnv() -> bool:

@@ -50,10 +50,13 @@ def _runTask(
 
 
 def _loadEnv(env: Optional[str], envSuffix: Optional[str]) -> None:
-    """Layered env load. Order: ~/.sgfl/credentials -> .env (or .env.<env>).
+    """Layered env load. Order: ~/.sgfl/credentials -> ~/.sgfl/config ->
+    .env (or .env.<env>).
 
     - Credentials file is always tried first (silent if missing) so per-developer
       keys (PUBLISH_KEY/DOWNLOAD_KEY/USER_ID) are available.
+    - Config (per-developer preferences, `sgfl config`) loads second with
+      override=False, making it the weakest layer: everything above it wins.
     - If `env` is given, .env.<env> is loaded with override=True. The file is
       required (hard fail if missing). `.env` is NOT loaded in this case to
       keep environment isolation explicit.
@@ -62,6 +65,7 @@ def _loadEnv(env: Optional[str], envSuffix: Optional[str]) -> None:
     - `envSuffix` (deprecated) only applies when no `env` arg is given.
     """
     loadCredentials()
+    loadConfig()
 
     if env:
         loadEnvFile(env)
@@ -251,6 +255,7 @@ def build(
     place ID belonging to the game at all.
     """
     loadCredentials()
+    loadConfig()
     _runTask(
         "build",
         detailed=detailed,
@@ -285,6 +290,7 @@ def preflightCmd(
     several minutes into a build as "User unauthorized to update place".
     """
     loadCredentials()
+    loadConfig()
     _runTask(
         "preflight",
         detailed=detailed,
@@ -345,6 +351,7 @@ def upload(
     """
     _validateVersionType(versionType)
     loadCredentials()
+    loadConfig()
     _runTask(
         "upload",
         detailed=detailed,
@@ -443,6 +450,7 @@ def publish(
     _validateVersionType(versionType)
 
     loadCredentials()
+    loadConfig()
 
     _runTask(
         "publish",
@@ -549,4 +557,70 @@ def authStatusCmd(
         pullEnabled=False,
         envDiagnosticKeys=[],
         fn=authStatus,
+    )
+
+
+def configListCmd(
+    detailed: Annotated[
+        bool,
+        typer.Option(
+            "--detailed",
+            "-d",
+            help="Print detailed diagnostics if an error occurs.",
+        ),
+    ] = False,
+):
+    """Show per-developer preferences and whether anything overrides them."""
+    _runTask(
+        "config-list",
+        detailed=detailed,
+        pullEnabled=False,
+        envDiagnosticKeys=[],
+        fn=configList,
+    )
+
+
+def configSetCmd(
+    key: Annotated[str, typer.Argument(help="Preference key, e.g. EDITOR_COMMAND.")],
+    value: Annotated[
+        str,
+        typer.Argument(
+            help="Value to store. For EDITOR_COMMAND: a shell command ('zed .'), or 'none' to disable the editor launch."
+        ),
+    ],
+    detailed: Annotated[
+        bool,
+        typer.Option(
+            "--detailed",
+            "-d",
+            help="Print detailed diagnostics if an error occurs.",
+        ),
+    ] = False,
+):
+    _runTask(
+        "config-set",
+        detailed=detailed,
+        pullEnabled=False,
+        envDiagnosticKeys=[],
+        fn=lambda: configSet(key, value),
+    )
+
+
+def configUnsetCmd(
+    key: Annotated[str, typer.Argument(help="Preference key to remove, e.g. EDITOR_COMMAND.")],
+    detailed: Annotated[
+        bool,
+        typer.Option(
+            "--detailed",
+            "-d",
+            help="Print detailed diagnostics if an error occurs.",
+        ),
+    ] = False,
+):
+    _runTask(
+        "config-unset",
+        detailed=detailed,
+        pullEnabled=False,
+        envDiagnosticKeys=[],
+        fn=lambda: configUnset(key),
     )

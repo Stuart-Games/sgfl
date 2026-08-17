@@ -372,6 +372,32 @@ def _resolveRojoServePort(requestedPort: Optional[int]) -> Optional[int]:
     )
 
 
+def _launchEditor():
+    """Open the developer's editor, per EDITOR_COMMAND (v2.11.0).
+
+    Unset -> the historical `code .`; 'none' or empty -> skipped, for
+    developers whose editor is already open (set once via
+    `sgfl config set EDITOR_COMMAND none`); anything else runs as a shell
+    command. Like the Studio open above, a failure here must not abort the
+    flow — the editor is a convenience, and rojo serve still has to start."""
+    editorCommand = resolveEditorCommand()
+    if editorCommand is None:
+        announceStep("Skipping editor launch (EDITOR_COMMAND is set to none).")
+        return
+    try:
+        runCommand(
+            editorCommand,
+            step=f"Opening editor ({editorCommand}).",
+            captureOutput=False,
+            shell=True,
+        )
+    except SGFLError as err:
+        warn(
+            f"Could not launch the editor ({editorCommand}): {err.message} "
+            f"Continuing — open your editor manually if needed."
+        )
+
+
 def startPlace(pull: bool, servePort: Optional[int] = None):
     announceStep("Checking environment configuration for publish flow.")
     placeId = getEnvSafe("PLACE_ID")
@@ -445,12 +471,7 @@ def startPlace(pull: bool, servePort: Optional[int] = None):
             f"Continuing — open the place manually if needed."
         )
 
-    runCommand(
-        ["code", "."],
-        step="Opening project in VS Code.",
-        captureOutput=False,
-        shell=True,
-    )
+    _launchEditor()
     resolvedPort = _resolveRojoServePort(servePort)
     serveCommand = ["rojo", "serve"]
     if resolvedPort is not None:
@@ -819,6 +840,70 @@ def authStatus():
         if notes:
             line += "; notes: " + "; ".join(notes)
         print(line)
+
+
+def _normalizeConfigKey(key: str) -> str:
+    normalized = key.strip().upper()
+    if normalized not in CONFIG_KEYS:
+        raise SGFLError(
+            f"Unknown config key: {key}",
+            details=f"Valid keys: {', '.join(CONFIG_KEYS)}.",
+            suggestions=[f"{name} — {helpText}" for name, helpText in CONFIG_KEYS.items()],
+        )
+    return normalized
+
+
+def configSet(key: str, value: str):
+    normalized = _normalizeConfigKey(key)
+    values = readConfigFile()
+    values[normalized] = value.strip()
+    path = writeConfigFile(values)
+    print(
+        f"{color.GREEN}{color.BOLD}SUCCESS{color.END} "
+        f"Set {normalized}={values[normalized]} in {path}."
+    )
+
+
+def configUnset(key: str):
+    normalized = _normalizeConfigKey(key)
+    values = readConfigFile()
+    if normalized not in values:
+        print(f"{color.YELLOW}{color.BOLD}NOOP{color.END} {normalized} is not set.")
+        return
+    del values[normalized]
+    path = writeConfigFile(values)
+    print(f"{color.GREEN}{color.BOLD}SUCCESS{color.END} Removed {normalized} from {path}.")
+
+
+def configList():
+    announceStep(f"Inspecting preferences at {CONFIG_PATH}.")
+    values = readConfigFile()
+    if not os.path.exists(CONFIG_PATH):
+        print(
+            f"{color.YELLOW}{color.BOLD}MISSING{color.END} No config file yet — defaults are in effect. "
+            f"Create one with {color.BOLD}sgfl config set <KEY> <value>{color.END}."
+        )
+
+    for name, helpText in CONFIG_KEYS.items():
+        if name in values:
+            print(f"  - {name}: {color.GREEN}SET{color.END} value={values[name]}")
+        else:
+            print(f"  - {name}: unset (default applies)")
+        print(f"      {helpText}")
+
+    unknown = [key for key in values if key not in CONFIG_KEYS]
+    for key in unknown:
+        warn(f"Unknown key in {CONFIG_PATH}: {key} (still loaded into the environment, but sgfl does not use it).")
+
+    # The file is the weakest layer, so tell the developer when something
+    # above it (shell env, credentials, a project .env) will win anyway.
+    for name in CONFIG_KEYS:
+        envValue = os.environ.get(name)
+        if envValue is not None and envValue.strip() != values.get(name, "").strip():
+            print(
+                f"{color.CYAN}{color.BOLD}INFO{color.END} {name} is currently "
+                f"{envValue!r} in this shell's environment, which overrides the config file."
+            )
 
 
 def _formatPlaceFileSummary(path: str) -> str:
