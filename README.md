@@ -17,7 +17,7 @@ You don't need to know the Roblox ecosystem. This is everything sgfl touches:
 |---|---|
 | **Roblox Studio** | Roblox's editor. Maps, UI and models are built here. |
 | **Place / Universe** | A *place* is one level file; a *universe* (a.k.a. *experience*) is the game that contains places. Each has a numeric id. |
-| **[Rojo](https://rojo.space/)** | Syncs `.luau` script files on disk into Studio live, so you write code in a real editor. sgfl runs it for you. |
+| **[Rojo](https://rojo.space/)** | Syncs `.luau` script files on disk into Studio live, so you write code in a real editor. Two halves: a command-line tool (Rokit installs it) and a Studio plugin — see [Rojo](#rojo). sgfl runs it for you. |
 | **[Rokit](https://github.com/rojo-rbx/rokit)** | Installs the command-line tools a project needs (Rojo, Wally, …) at the exact versions pinned in the project's `rokit.toml`. Think `nvm`/`rustup`. |
 | **[Wally](https://wally.run/)** | Package manager for Roblox libraries (think `npm`). Dependencies are listed in `wally.toml` and installed into `Packages/`. sgfl runs `wally install` automatically when needed — you never have to. |
 | **[Git LFS](https://git-lfs.com/)** | Git extension for large binary files. Models and maps are stored through it. **Without it you clone tiny placeholder files instead of the game** — see [Git LFS](#git-lfs). |
@@ -102,8 +102,8 @@ rojo plugin install
 
 - `--recurse-submodules` fetches shared libraries that live in their own repos (forgot it? `git submodule update --init --recursive`).
 - `git lfs pull` makes sure the real model/map files are present, not placeholders.
-- `rokit install` installs the project's pinned tools; say yes if it asks to trust them.
-- `rojo plugin install` adds the Rojo plugin to Studio (once per machine).
+- `rokit install` installs the project's pinned tools — **this is what installs Rojo** (and Wally); say yes if it asks to trust them. There is no separate Rojo download.
+- `rojo plugin install` adds the Rojo plugin to Studio (once per machine; restart Studio if it was open). See [Rojo](#rojo).
 
 **Tell sgfl which place to use.** Create a `.env` file in the project root (it is gitignored — it's yours):
 
@@ -120,7 +120,7 @@ Now run:
 sgfl start
 ```
 
-When Studio opens, click **Rojo → Connect** in the Plugins tab. You're in.
+When Studio opens, go to the **Plugins** tab, click **Rojo**, then **Connect**. The plugin turns green and lists the project name — your scripts are now live-synced. You're in.
 
 ## Daily loop
 
@@ -155,7 +155,22 @@ It asks for a name, `PLACE_ID` and `UNIVERSE_ID`, then scaffolds `src/`, `assets
 git init && git lfs track "*.rbxm" && git add .gitattributes
 ```
 
-Run `sgfl save` once to pull the place's current contents into the repo. To use Wally packages, `rokit add UpliftGames/wally`, then `wally init` and list dependencies in `wally.toml`.
+If this is your first project on this machine, run `rojo plugin install` too (see [Rojo](#rojo)). Run `sgfl save` once to pull the place's current contents into the repo. To use Wally packages, `rokit add UpliftGames/wally`, then `wally init` and list dependencies in `wally.toml`.
+
+## Rojo
+
+Rojo has two halves, and both must be present:
+
+| Half | Installed by | Check |
+|---|---|---|
+| **Command-line tool** — builds the place and serves your script files | `rokit install` in the project (version pinned in `rokit.toml`) | `rojo --version` inside the project |
+| **Studio plugin** — receives those files inside Studio | `rojo plugin install`, once per machine, then restart Studio | A **Rojo** button in Studio's Plugins tab |
+
+You never run `rojo build` or `rojo serve` yourself — `sgfl start` does both and leaves `rojo serve` running in that terminal (Ctrl+C to stop). The one manual step is clicking **Connect** in the plugin each time Studio opens.
+
+- `rojo` only works inside a project folder, because Rokit picks the version from that project's `rokit.toml`.
+- Installing the plugin with `rojo plugin install` (rather than from the Creator Store) keeps it matched to the command-line version. Re-run it if the plugin reports a version mismatch after a project upgrades Rojo.
+- Which folders sync where is defined in `default.project.json`. Anything Rojo syncs is owned by the files on disk; edits to those scripts in Studio are overwritten.
 
 ## Git LFS
 
@@ -172,7 +187,8 @@ Add `-d` for full diagnostics on any failure: `sgfl -d start`.
 | Map/models missing after `start`; warning that blob entries arrived empty | Git LFS placeholders. See [Git LFS](#git-lfs). |
 | `401`, `403`, or `User unauthorized to update place` | Key expired, missing a permission, not scoped to this experience, or your IP isn't allowed. Check the key in the dashboard; `sgfl auth status` shows what sgfl has. |
 | `rojo` / `wally` not found | Run `rokit install` in the project, in a fresh terminal. |
-| Scripts don't sync into Studio | Click **Connect** in the Rojo plugin. If sgfl printed that it picked a different port, enter that port in the plugin first. |
+| No **Rojo** button in Studio's Plugins tab | Run `rojo plugin install` in the project, then restart Studio. |
+| Scripts don't sync into Studio | Click **Connect** in the Rojo plugin, and check the `sgfl start` terminal is still running. If sgfl printed that it picked a different port, enter that port in the plugin first. |
 | Entry files rejected for CRLF line endings (Windows) | Git converted them on checkout. Make sure `.gitattributes` has `*.sgfl text eol=lf`, then run the re-checkout command the error prints. |
 | `sgfl save` warns an entry "came back empty" | A previous `start`/`publish` died partway and left the place without assets. Answer **NO**, run `sgfl start` again, then save. |
 | "No `assets.json`" error | You're not in the project root. |
