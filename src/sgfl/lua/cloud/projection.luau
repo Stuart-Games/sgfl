@@ -47,6 +47,21 @@ local ReflectionService = game:GetService("ReflectionService")
 local SerializationService = game:GetService("SerializationService")
 local CollectionService = game:GetService("CollectionService")
 
+-- Execution sessions kill a script that runs ~10 s without yielding
+-- ("Script timeout: exhausted allowed execution time") — the same rule as
+-- Studio's ScriptContext, and independent of the task's wall-clock timeout.
+-- Projecting a 45k-instance place costs ~10 s of CPU, so a project grows into
+-- that cliff silently. Yielding every few thousand units resets the watchdog
+-- and changes nothing about the output (order, bytes, warnings).
+local YIELD_EVERY = 2000
+local workUnits = 0
+local function breathe()
+	workUnits += 1
+	if workUnits % YIELD_EVERY == 0 then
+		task.wait()
+	end
+end
+
 local CONFIG = HttpService:JSONDecode([===[__SGFL_CONFIG__]===])
 
 local warnings = {}
@@ -611,6 +626,7 @@ SPECIAL = {
 }
 
 local function projectInstance(inst: Instance, pathText: string, out: { string }, isRoot: boolean?)
+	breathe()
 	local className = inst.ClassName
 	local hidden = islandProps(inst)
 

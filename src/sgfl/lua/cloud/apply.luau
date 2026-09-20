@@ -32,6 +32,21 @@ local HttpService = game:GetService("HttpService")
 local SerializationService = game:GetService("SerializationService")
 local AssetService = game:GetService("AssetService")
 
+-- Execution sessions kill a script that runs ~10 s without yielding
+-- ("Script timeout: exhausted allowed execution time") — the same rule as
+-- Studio's ScriptContext, and independent of the task's wall-clock timeout.
+-- Applying a 45k-block place costs ~4 s of CPU (projecting it ~10 s), so a
+-- project grows into that cliff silently. Yielding every few thousand units resets the watchdog
+-- and changes nothing about the output (order, bytes, warnings).
+local YIELD_EVERY = 2000
+local workUnits = 0
+local function breathe()
+	workUnits += 1
+	if workUnits % YIELD_EVERY == 0 then
+		task.wait()
+	end
+end
+
 local CONFIG = HttpService:JSONDecode([===[__SGFL_CONFIG__]===])
 local POSTAPPLY = __SGFL_POSTAPPLY__
 
@@ -165,6 +180,7 @@ local function parseEntryText(text: string, entryLabel: string): { Block }
 	local lines = text:split("\n")
 	local i = 1
 	while i <= #lines do
+		breathe()
 		local line = lines[i]
 		-- structural lines never end in a raw \r (heredoc bodies, which may,
 		-- are consumed below and never reach this check): CRLF conversion
@@ -767,6 +783,7 @@ end
 local function applyBlocks(blocks: { Block }, root: Instance, entryRoot: Instance, labelPrefix: string)
 	local instanceByPath: { [string]: Instance } = { ["."] = root }
 	for _, block in blocks do
+		breathe()
 		if block.isSidecar then
 			continue
 		end
@@ -1015,6 +1032,7 @@ end
 
 local resolvedRefs, failedRefs = 0, 0
 for _, pending in pendingRefs do
+	breathe()
 	local target = resolveRef(pending.refText, pending.entryRoot)
 	if target then
 		local okSet, setErr = pcall(function()
