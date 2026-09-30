@@ -612,12 +612,31 @@ local function applyProps(inst: Instance, block: Block, entryRoot: Instance, pat
 			end
 		end
 	end
+	-- encodePropLine heredocs long attribute and style strings too, so the
+	-- prefixed names must be routed like their single-line forms, not set as
+	-- properties (which silently dropped every attribute over 200 characters)
+	local heredocStyles: { [string]: string } = {}
 	for name, raw in block.heredocs do
-		local okSet, setErr = pcall(function()
-			(inst :: any)[name] = raw
-		end)
-		if not okSet then
-			addWarning(pathLabel .. "." .. name .. " (heredoc) set failed: " .. tostring(setErr))
+		if name:sub(1, 6) == "@Attr." then
+			local attrName = name:sub(7)
+			if attrName:sub(1, 4) == "RBX_" then
+				continue
+			end
+			local okSet, setErr = pcall(function()
+				inst:SetAttribute(attrName, raw)
+			end)
+			if not okSet then
+				addWarning(pathLabel .. " attribute " .. attrName .. " (heredoc): " .. tostring(setErr))
+			end
+		elseif name:sub(1, 7) == "@Style." then
+			heredocStyles[name:sub(8)] = raw
+		else
+			local okSet, setErr = pcall(function()
+				(inst :: any)[name] = raw
+			end)
+			if not okSet then
+				addWarning(pathLabel .. "." .. name .. " (heredoc) set failed: " .. tostring(setErr))
+			end
 		end
 	end
 	for name, valueText in block.attrs do
@@ -645,7 +664,7 @@ local function applyProps(inst: Instance, block: Block, entryRoot: Instance, pat
 	for name in block.styles do
 		table.insert(styleNames, name)
 	end
-	if #styleNames > 0 then
+	if #styleNames > 0 or next(heredocStyles) ~= nil then
 		local styleValues = {}
 		for _, name in styleNames do
 			local okDecode, value = pcall(decodeValue, block.styles[name])
@@ -654,6 +673,9 @@ local function applyProps(inst: Instance, block: Block, entryRoot: Instance, pat
 			else
 				addWarning(pathLabel .. " style " .. name .. ": " .. tostring(value))
 			end
+		end
+		for name, raw in heredocStyles do
+			styleValues[name] = raw
 		end
 		local okSet, setErr = pcall(function()
 			(inst :: any):SetProperties(styleValues)
