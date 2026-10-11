@@ -200,22 +200,44 @@ def test_format_command_passes_string_commands_through():
     assert util._formatCommand("zed ~/my workspace") == "zed ~/my workspace"
 
 
-# --- Claude Code conventions (~/.sgfl/claude-conventions.md) ----------------
+# --- Claude Code conventions (.claude/rules/sgfl-conventions.md) ----------
 
 
-def test_sync_claude_conventions_writes_missing_file(isolatedConfig, tmp_path):
+@pytest.fixture
+def conventionsProject(isolatedCwd, isolatedConfig):
+    (isolatedCwd / "assets.json").write_text("{}", encoding="utf-8")
+    return isolatedCwd
+
+
+def test_sync_claude_conventions_writes_the_project_rule(conventionsProject):
     assert util.syncClaudeConventions() is True
-    written = tmp_path / util.CONVENTIONS_FILE_NAME
-    assert written.read_text(encoding="utf-8").startswith("# sgfl project conventions")
+    rule = conventionsProject / ".claude" / "rules" / "sgfl-conventions.md"
+    assert rule.read_text(encoding="utf-8").startswith("# sgfl project conventions")
+    ignored = (conventionsProject / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert util.RULES_GITIGNORE_LINE in ignored
 
 
-def test_sync_claude_conventions_is_a_noop_when_current(isolatedConfig):
+def test_sync_claude_conventions_is_a_noop_when_current(conventionsProject):
     util.syncClaudeConventions()
     assert util.syncClaudeConventions() is False
 
 
-def test_sync_claude_conventions_replaces_a_stale_copy(isolatedConfig, tmp_path):
-    stale = tmp_path / util.CONVENTIONS_FILE_NAME
+def test_sync_claude_conventions_replaces_a_stale_copy(conventionsProject):
+    stale = conventionsProject / ".claude" / "rules" / "sgfl-conventions.md"
+    stale.parent.mkdir(parents=True)
     stale.write_text("old rules\n", encoding="utf-8")
     assert util.syncClaudeConventions() is True
     assert stale.read_text(encoding="utf-8") != "old rules\n"
+
+
+def test_sync_claude_conventions_appends_to_an_existing_gitignore_once(conventionsProject):
+    (conventionsProject / ".gitignore").write_text("Place.rbxl", encoding="utf-8")
+    util.syncClaudeConventions()
+    util.syncClaudeConventions()
+    text = (conventionsProject / ".gitignore").read_text(encoding="utf-8")
+    assert text == f"Place.rbxl\n{util.RULES_GITIGNORE_LINE}\n"
+
+
+def test_sync_claude_conventions_skips_non_projects(isolatedCwd, isolatedConfig):
+    assert util.syncClaudeConventions() is False
+    assert not (isolatedCwd / ".claude").exists()

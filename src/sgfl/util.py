@@ -471,11 +471,13 @@ CONFIG_KEYS = {
 EDITOR_COMMAND_KEY = "EDITOR_COMMAND"
 DEFAULT_EDITOR_COMMAND = "code ."
 
-# Claude Code conventions shared by every sgfl project (v2.12.0). Packaged
-# with sgfl and mirrored to ~/.sgfl on every command, so each developer's
-# copy follows their installed sgfl; project CLAUDE.md files import it from
-# there instead of carrying their own copy.
+# Claude Code conventions shared by every sgfl project (v2.13.0). Packaged
+# with sgfl and written into the project's .claude/rules on every command
+# run there, so each developer's copy follows their installed sgfl. A
+# project rule loads with no import and no external-include approval, which
+# the v2.12.0 ~/.sgfl import needed and the desktop app never asked for.
 CONVENTIONS_FILE_NAME = "claude-conventions.md"
+RULES_GITIGNORE_LINE = ".claude/rules/sgfl-conventions.md"
 
 
 def resolveEditorCommand() -> Optional[str]:
@@ -611,24 +613,43 @@ def loadCredentials() -> bool:
     return True
 
 
-def getConventionsPath() -> str:
-    return os.path.join(CREDENTIALS_DIR, CONVENTIONS_FILE_NAME)
+def _ensureGitignoreLine(line: str) -> None:
+    path = getFileURI(".gitignore")
+    existing = ""
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            existing = f.read()
+    if line in existing.splitlines():
+        return
+    with open(path, "a", encoding="utf-8", newline="\n") as f:
+        if existing and not existing.endswith("\n"):
+            f.write("\n")
+        f.write(line + "\n")
+    announceStep(f"Added {line} to .gitignore (sgfl rewrites that file on every command).")
 
 
 def syncClaudeConventions() -> bool:
-    """Mirror the packaged conventions file to ~/.sgfl when it differs.
+    """Write the packaged conventions into the project's .claude/rules when they differ.
 
-    Best-effort and silent: never raises, returns True only when written.
+    Runs only inside an sgfl project (assets.json present). Best-effort and
+    silent: never raises, returns True only when written.
     """
     try:
+        if not os.path.exists(getFileURI("assets.json")):
+            return False
         with open(getAbsoluteFileURI(f"misc/{CONVENTIONS_FILE_NAME}"), "rb") as f:
             packaged = f.read()
-        target = getConventionsPath()
+        _ensureGitignoreLine(RULES_GITIGNORE_LINE)
+        # v2.12.0 mirrored the file to ~/.sgfl instead; nothing reads it now.
+        legacy = os.path.join(CREDENTIALS_DIR, CONVENTIONS_FILE_NAME)
+        if os.path.exists(legacy):
+            os.remove(legacy)
+        target = getFileURI(RULES_GITIGNORE_LINE)
         if os.path.exists(target):
             with open(target, "rb") as f:
                 if f.read() == packaged:
                     return False
-        os.makedirs(CREDENTIALS_DIR, exist_ok=True)
+        os.makedirs(os.path.dirname(target), exist_ok=True)
         with open(target, "wb") as f:
             f.write(packaged)
         return True

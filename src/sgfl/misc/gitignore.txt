@@ -9,3 +9,6 @@
 sourcemap.json
 /sourcemap.json
 .env
+
+# Claude Code conventions written by sgfl on every command
+.claude/rules/sgfl-conventions.md

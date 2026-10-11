@@ -2,7 +2,7 @@
 
 Shared rules for every Roblox project built with sgfl and Rojo. Each repo's own `CLAUDE.md` adds project facts and may override anything here.
 
-sgfl installs this file at `~/.sgfl/claude-conventions.md` and refreshes it on every command, so edit the copy in the sgfl repo (`src/sgfl/misc/claude-conventions.md`), never the installed one.
+sgfl writes this file into each project as `.claude/rules/sgfl-conventions.md` (gitignored) and refreshes it on every command run there, so edit the copy in the sgfl repo (`src/sgfl/misc/claude-conventions.md`), never the one in a project.
 
 ## What an sgfl project is
 

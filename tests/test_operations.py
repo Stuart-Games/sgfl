@@ -350,7 +350,8 @@ def test_config_set_cli_accepts_unquoted_multiword_values(isolatedConfigOps, mon
 def test_write_claude_stub_imports_the_shared_conventions(isolatedCwd):
     assert operations.writeClaudeStub() is True
     text = (isolatedCwd / "CLAUDE.md").read_text(encoding="utf-8")
-    assert "@~/.sgfl/claude-conventions.md" in text
+    assert ".claude/rules/sgfl-conventions.md" in text
+    assert "@" not in text
 
 
 def test_write_claude_stub_keeps_an_existing_file(isolatedCwd):
