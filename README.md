@@ -149,7 +149,7 @@ In an empty directory:
 sgfl init
 ```
 
-It asks for a name, `PLACE_ID` and `UNIVERSE_ID`, then scaffolds `src/`, `assets.json`, `default.project.json`, `.env`, and a Rokit toolchain with Rojo. Then set up git and LFS before your first commit:
+It asks for a name, `PLACE_ID` and `UNIVERSE_ID`, then scaffolds `src/`, `assets.json`, `default.project.json`, `.env`, a `CLAUDE.md` that imports the shared Claude Code conventions (sgfl keeps a copy current at `~/.sgfl/claude-conventions.md`), and a Rokit toolchain with Rojo. Then set up git and LFS before your first commit:
 
 ```bash
 git init && git lfs track "*.rbxm" && git add .gitattributes

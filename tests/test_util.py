@@ -198,3 +198,24 @@ def test_load_config_fills_unset_keys(isolatedConfig, monkeypatch):
 
 def test_format_command_passes_string_commands_through():
     assert util._formatCommand("zed ~/my workspace") == "zed ~/my workspace"
+
+
+# --- Claude Code conventions (~/.sgfl/claude-conventions.md) ----------------
+
+
+def test_sync_claude_conventions_writes_missing_file(isolatedConfig, tmp_path):
+    assert util.syncClaudeConventions() is True
+    written = tmp_path / util.CONVENTIONS_FILE_NAME
+    assert written.read_text(encoding="utf-8").startswith("# sgfl project conventions")
+
+
+def test_sync_claude_conventions_is_a_noop_when_current(isolatedConfig):
+    util.syncClaudeConventions()
+    assert util.syncClaudeConventions() is False
+
+
+def test_sync_claude_conventions_replaces_a_stale_copy(isolatedConfig, tmp_path):
+    stale = tmp_path / util.CONVENTIONS_FILE_NAME
+    stale.write_text("old rules\n", encoding="utf-8")
+    assert util.syncClaudeConventions() is True
+    assert stale.read_text(encoding="utf-8") != "old rules\n"

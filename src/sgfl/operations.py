@@ -195,6 +195,7 @@ WALLY_LOCKFILE = "wally.lock"
 # Every directory wally can install into (shared / server / dev realms).
 WALLY_PACKAGE_DIRS = ("Packages", "ServerPackages", "DevPackages")
 WALLY_STAMP_NAME = ".sgfl-wally-stamp"
+CLAUDE_STUB_NAME = "CLAUDE.md"
 
 
 def _wallyStamp() -> str:
@@ -631,6 +632,17 @@ def _promptInitConfig() -> dict:
     return config
 
 
+def writeClaudeStub() -> bool:
+    """Write the CLAUDE.md that imports the shared conventions, unless one exists."""
+    if os.path.exists(CLAUDE_STUB_NAME):
+        return False
+    with open(getAbsoluteFileURI("misc/claude-md.txt"), "r", encoding="utf-8") as f:
+        text = f.read()
+    with open(CLAUDE_STUB_NAME, "w", encoding="utf-8", newline="\n") as g:
+        g.write(text)
+    return True
+
+
 def initPlace():
     config = _promptInitConfig()
 
@@ -678,6 +690,8 @@ def initPlace():
         text = f.readlines()
         with open(".gitattributes", "w") as g:
             g.writelines(text)
+
+    writeClaudeStub()
 
     runCommand(["rokit", "init"], step="Initializing Rokit toolchain.")
     runCommand(["rokit", "add", "rojo"], step="Adding Rojo to toolchain.")

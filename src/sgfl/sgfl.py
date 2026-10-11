@@ -14,6 +14,7 @@ def _runTask(
 ):
     if taskName != "update":
         checkForUpdates()
+    syncClaudeConventions()
     try:
         fn()
     except typer.BadParameter:

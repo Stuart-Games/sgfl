@@ -471,6 +471,12 @@ CONFIG_KEYS = {
 EDITOR_COMMAND_KEY = "EDITOR_COMMAND"
 DEFAULT_EDITOR_COMMAND = "code ."
 
+# Claude Code conventions shared by every sgfl project (v2.12.0). Packaged
+# with sgfl and mirrored to ~/.sgfl on every command, so each developer's
+# copy follows their installed sgfl; project CLAUDE.md files import it from
+# there instead of carrying their own copy.
+CONVENTIONS_FILE_NAME = "claude-conventions.md"
+
 
 def resolveEditorCommand() -> Optional[str]:
     """The command `sgfl start` uses to open an editor, or None when disabled.
@@ -603,6 +609,31 @@ def loadCredentials() -> bool:
         return False
     dotenv.load_dotenv(CREDENTIALS_PATH, override=False)
     return True
+
+
+def getConventionsPath() -> str:
+    return os.path.join(CREDENTIALS_DIR, CONVENTIONS_FILE_NAME)
+
+
+def syncClaudeConventions() -> bool:
+    """Mirror the packaged conventions file to ~/.sgfl when it differs.
+
+    Best-effort and silent: never raises, returns True only when written.
+    """
+    try:
+        with open(getAbsoluteFileURI(f"misc/{CONVENTIONS_FILE_NAME}"), "rb") as f:
+            packaged = f.read()
+        target = getConventionsPath()
+        if os.path.exists(target):
+            with open(target, "rb") as f:
+                if f.read() == packaged:
+                    return False
+        os.makedirs(CREDENTIALS_DIR, exist_ok=True)
+        with open(target, "wb") as f:
+            f.write(packaged)
+        return True
+    except OSError:
+        return False
 
 
 def loadConfig() -> bool:

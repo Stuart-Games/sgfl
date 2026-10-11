@@ -1,0 +1,7 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+Shared sgfl project conventions (toolchain, Studio MCP, code style), kept current by sgfl:
+
+@~/.sgfl/claude-conventions.md
