@@ -12,6 +12,7 @@ from .sgfl import (
     publish,
     migrate,
     update,
+    ui,
     authLoginCmd,
     authStatusCmd,
     configListCmd,
@@ -35,6 +36,7 @@ app.command()(upload)
 app.command()(publish)
 app.command()(migrate)
 app.command()(update)
+app.command()(ui)
 
 authApp = typer.Typer(
     pretty_exceptions_enable=False,
