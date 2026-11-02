@@ -629,3 +629,16 @@ def configUnsetCmd(
         envDiagnosticKeys=[],
         fn=lambda: configUnset(key),
     )
+
+
+def ui(
+    folders: Annotated[
+        Optional[list[str]],
+        typer.Argument(help="Extra folders to scan for projects, for this run only. Saved folders come from ~/.sgfl/ui.json."),
+    ] = None,
+    port: Annotated[int, typer.Option("--port", help="Dashboard port.")] = 8765,
+):
+    """Localhost dashboard: finds your sgfl projects, keeps rojo serve alive, runs Start and Save."""
+    from .dashboard import runDashboard
+
+    runDashboard(folders or [], port)
