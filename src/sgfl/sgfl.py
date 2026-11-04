@@ -637,8 +637,11 @@ def ui(
         typer.Argument(help="Extra folders to scan for projects, for this run only. Saved folders come from ~/.sgfl/ui.json."),
     ] = None,
     port: Annotated[int, typer.Option("--port", help="Dashboard port.")] = 8765,
+    openBrowser: Annotated[
+        bool, typer.Option("--open/--no-open", help="Open the dashboard in your browser on launch.")
+    ] = True,
 ):
     """Localhost dashboard: finds your sgfl projects, keeps rojo serve alive, runs Start and Save."""
     from .dashboard import runDashboard
 
-    runDashboard(folders or [], port)
+    runDashboard(folders or [], port, openBrowser)

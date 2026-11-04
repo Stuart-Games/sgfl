@@ -358,3 +358,38 @@ def test_write_claude_stub_keeps_an_existing_file(isolatedCwd):
     (isolatedCwd / "CLAUDE.md").write_text("mine\n", encoding="utf-8")
     assert operations.writeClaudeStub() is False
     assert (isolatedCwd / "CLAUDE.md").read_text(encoding="utf-8") == "mine\n"
+
+
+def test_studio_launches_are_spaced_out(tmp_path, monkeypatch):
+    from sgfl import operations
+
+    clock = [1000.0]
+    slept = []
+    monkeypatch.setattr(operations, "CREDENTIALS_DIR", str(tmp_path))
+    monkeypatch.setattr(operations, "STUDIO_LAUNCH_STAMP", str(tmp_path / "studio-launch"))
+    monkeypatch.setattr(operations.time, "time", lambda: clock[0])
+    monkeypatch.setattr(operations.time, "sleep", lambda s: slept.append(s) or clock.__setitem__(0, clock[0] + s))
+
+    operations._waitForStudioLaunchSlot()  # nothing launched before: no wait
+    assert slept == []
+    clock[0] += 5
+    operations._waitForStudioLaunchSlot()  # 5s after the first: waits out the gap
+    assert slept == [operations.STUDIO_LAUNCH_GAP_SECONDS - 5]
+    clock[0] += operations.STUDIO_LAUNCH_GAP_SECONDS + 1
+    operations._waitForStudioLaunchSlot()  # long after: no wait
+    assert len(slept) == 1
+
+
+def test_launch_stamp_lock_round_trips(tmp_path):
+    from sgfl import operations
+
+    with open(tmp_path / "stamp", "a+") as f:
+        assert operations._lockFile(f)
+        f.seek(0)
+        f.truncate()
+        f.write("1")
+        f.flush()
+        operations._unlockFile(f)
+    with open(tmp_path / "stamp", "a+") as f:  # free again for the next launch
+        assert operations._lockFile(f)
+        operations._unlockFile(f)

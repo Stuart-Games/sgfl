@@ -632,3 +632,53 @@ def test_retry_delay_backs_off_exponentially_and_caps():
     assert cloud._retryDelay(None, 0) == cloud.RETRY_BASE_DELAY_SECONDS
     assert cloud._retryDelay(None, 1) == cloud.RETRY_BASE_DELAY_SECONDS * 2
     assert cloud._retryDelay(None, 99) == cloud.RETRY_MAX_DELAY_SECONDS
+
+
+# --- CLI -> operations wiring ----------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "argv, opName",
+    [
+        (["build", "testing", "--out", "x.rbxl", "--fail-on-warn"], "buildArtifact"),
+        # upload has no --fail-on-warn: its bytes were already built, so there is
+        # nothing left that could warn about matching the repo.
+        (["upload", "x.rbxl", "testing"], "uploadArtifact"),
+        (["publish", "testing", "--dry-run", "--fail-on-warn"], "publishPlaces"),
+    ],
+)
+def test_cli_kwargs_match_operation_signature(monkeypatch, argv, opName):
+    """Every keyword the Typer command forwards must exist on the operation.
+
+    v2.8.0 added --fail-on-warn to publish's lambda but not to publishPlaces,
+    so every `sgfl publish` died with a TypeError before loading the env file,
+    and nothing noticed for six releases because build/upload were wired
+    correctly and no test reached the lambda. Bind the captured call against
+    the real signature so the next flag cannot drift the same way.
+    """
+    import inspect
+
+    from typer.testing import CliRunner
+
+    from sgfl import sgfl as cli_module
+    from sgfl.cli import app
+
+    captured = {}
+
+    def record(*args, **kwargs):
+        captured["args"], captured["kwargs"] = args, kwargs
+
+    real = getattr(operations, opName)
+    monkeypatch.setattr(cli_module, opName, record)
+    monkeypatch.setattr(cli_module, "checkForUpdates", lambda: None)
+    monkeypatch.setattr(cli_module, "syncClaudeConventions", lambda: None)
+    monkeypatch.setattr(cli_module, "loadCredentials", lambda: None)
+    monkeypatch.setattr(cli_module, "loadConfig", lambda: None)
+
+    result = CliRunner().invoke(app, argv)
+
+    assert result.exit_code == 0, result.output
+    assert captured, "the command never reached its operation"
+    inspect.signature(real).bind(*captured["args"], **captured["kwargs"])
+    if "--fail-on-warn" in argv:
+        assert captured["kwargs"]["failOnWarn"] is True

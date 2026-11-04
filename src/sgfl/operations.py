@@ -399,6 +399,82 @@ def _launchEditor():
         )
 
 
+STUDIO_LAUNCH_GAP_SECONDS = 25
+STUDIO_LAUNCH_STAMP = os.path.join(CREDENTIALS_DIR, "studio-launch")
+
+
+def _waitForStudioLaunchSlot() -> None:
+    """Space Studio launches out across every sgfl process on the machine.
+
+    Two `roblox-studio:` opens a few seconds apart reach Studio while the first is
+    still starting up and signing in, and the second then asks you to log in again.
+    One launch per gap avoids that: a second `sgfl start` waits here (the file lock
+    queues a third behind it) until the first Studio has had time to finish."""
+    os.makedirs(CREDENTIALS_DIR, exist_ok=True)
+    with open(STUDIO_LAUNCH_STAMP, "a+") as f:
+        locked = _lockFile(f)
+        try:
+            f.seek(0)
+            try:
+                last = float(f.read().strip() or 0)
+            except ValueError:
+                last = 0.0
+            wait = last + STUDIO_LAUNCH_GAP_SECONDS - time.time()
+            if 0 < wait <= STUDIO_LAUNCH_GAP_SECONDS:
+                announceStep(
+                    f"Another Studio launched {STUDIO_LAUNCH_GAP_SECONDS - wait:.0f}s ago; "
+                    f"waiting {wait:.0f}s so it finishes signing in first."
+                )
+                time.sleep(wait)
+            f.seek(0)
+            f.truncate()
+            f.write(str(time.time()))
+            f.flush()
+        finally:
+            if locked:
+                _unlockFile(f)
+
+
+def _lockFile(f) -> bool:
+    """Exclusive lock on an open file, waiting for it. False if the platform gave up
+    (the timestamp alone still spaces launches; only the queueing is lost)."""
+    try:
+        import fcntl
+    except ImportError:
+        fcntl = None
+    if fcntl:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        return True
+    import msvcrt
+
+    f.seek(0)
+    # LK_LOCK retries for ~10 s, then raises; a launch ahead of us sleeps up to the full gap.
+    for _ in range(STUDIO_LAUNCH_GAP_SECONDS // 10 + 2):
+        try:
+            msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
+            return True
+        except OSError:
+            continue
+    return False
+
+
+def _unlockFile(f) -> None:
+    try:
+        import fcntl
+    except ImportError:
+        fcntl = None
+    if fcntl:
+        fcntl.flock(f, fcntl.LOCK_UN)
+        return
+    import msvcrt
+
+    f.seek(0)
+    try:
+        msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+    except OSError:
+        pass  # closing the file releases it too
+
+
 def startPlace(pull: bool, servePort: Optional[int] = None):
     announceStep("Checking environment configuration for publish flow.")
     placeId = getEnvSafe("PLACE_ID")
@@ -453,6 +529,11 @@ def startPlace(pull: bool, servePort: Optional[int] = None):
     # rest of the flow — we still want to open VS Code and start Rojo.
     # Warn and continue instead of propagating.
     try:
+        if platform in ("win32", "darwin"):
+            try:
+                _waitForStudioLaunchSlot()
+            except OSError:
+                pass  # spacing launches is a nicety; an unwritable ~/.sgfl must not block Studio
         if platform == "win32":  # windows (any ver)
             runCommand(
                 ["cmd", "/c", "start", "", placeOpenString],
@@ -1571,6 +1652,7 @@ def publishPlaces(
     versionType: str = "Published",
     expectPlaces: Optional[list[str]] = None,
     jsonPath: Optional[str] = None,
+    failOnWarn: bool = False,
 ):
     """Interactive one-shot: build the artifact, then upload it.
 
@@ -1578,6 +1660,7 @@ def publishPlaces(
     instead so the expensive half runs once and the bytes that were validated
     are the exact bytes promoted.
     """
+    resetIntegrityWarnings()
     announceStep(f"Loading environment file .env.{env}.")
     loadEnvFile(env)
 
@@ -1691,6 +1774,10 @@ def publishPlaces(
     finally:
         if not noBuild:
             deleteFile(PLACE_FILE_PATH)
+
+    # Same gate as build + upload: nothing that may not match the repo gets
+    # uploaded when the caller asked for that.
+    _enforceIntegrity(failOnWarn)
 
     try:
         record = _uploadToTargets(

@@ -1,3 +1,4 @@
+import signal
 import sys
 
 import typer
@@ -25,6 +26,12 @@ from .sgfl import (
 for stream in (sys.stdout, sys.stderr):
     if hasattr(stream, "reconfigure"):
         stream.reconfigure(errors="replace")
+
+# `sgfl ui` stops a run on Windows with Ctrl+Break (Ctrl+C cannot reach a separate
+# console group). Python's default for it ends the process on the spot; treat it
+# as Ctrl+C instead so `finally` blocks (Place.rbxl cleanup) still run.
+if hasattr(signal, "SIGBREAK"):
+    signal.signal(signal.SIGBREAK, signal.default_int_handler)
 
 app = typer.Typer(pretty_exceptions_enable=False)
 app.command()(start)

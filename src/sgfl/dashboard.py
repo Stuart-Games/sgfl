@@ -22,6 +22,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import webbrowser
 import threading
 import time
 from collections import deque
@@ -31,7 +32,8 @@ from typing import Optional
 import dotenv
 import requests
 
-from .util import CREDENTIALS_DIR, CREDENTIALS_PATH
+from . import proctree
+from .util import CREDENTIALS_DIR, CREDENTIALS_PATH, color
 
 STATE_PATH = os.path.join(CREDENTIALS_DIR, "ui-state.json")
 CONFIG_PATH = os.path.join(CREDENTIALS_DIR, "ui.json")
@@ -78,7 +80,14 @@ _STAGE_MARKERS = [
 ]
 _SERVING = re.compile(r"rojo server listening")
 _PUBLISHED = re.compile(r"published place version (\d+)")
+# operations._waitForStudioLaunchSlot: this start is holding its Studio launch back.
+_STUDIO_WAIT = re.compile(r"waiting (\d+)s so it finishes signing in")
+_STUDIO_OPENING = re.compile(r"opening roblox studio")
 _SAVED_FROM = re.compile(r"extracting binary sidecar from place version (\d+)")
+# A serve that dies on its own is restarted after these delays; one more death inside
+# the window means it is crash-looping (bad project file, port taken), so give up.
+RESTART_DELAYS = (1, 2, 5, 10, 20)
+RESTART_WINDOW_SECONDS = 120
 # Past this stage the build place is a script-only skeleton until the apply lands.
 _UNSAFE_CANCEL_STAGES = ("apply", "publish")
 
@@ -125,6 +134,49 @@ def _portFree(port: int) -> bool:
         return s.connect_ex(("127.0.0.1", port)) != 0
 
 
+class _Reaper:
+    """The dashboard's end of reaper.py: tells it which child trees to kill if we die.
+
+    Inert until start() (tests never start it).
+    """
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.proc: Optional[subprocess.Popen] = None
+
+    def start(self) -> None:
+        try:
+            self.proc = subprocess.Popen(
+                [sys.executable, "-m", "sgfl.reaper"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                **proctree.detachedKwargs(),  # a terminal's Ctrl+C / hangup must not take it down with us
+            )
+        except OSError:
+            self.proc = None
+
+    def _send(self, line: str) -> None:
+        with self.lock:
+            if self.proc is None or self.proc.stdin is None:
+                return
+            try:
+                self.proc.stdin.write(line + "\n")
+                self.proc.stdin.flush()
+            except (OSError, ValueError):
+                self.proc = None  # it died; the children simply lose their safety net
+
+    def track(self, pid: int) -> None:
+        self._send(f"+{pid}")
+
+    def untrack(self, pid: int) -> None:
+        self._send(f"-{pid}")
+
+
+_reaper = _Reaper()
+
+
 # ---------------------------------------------------------------------------
 # Studio awareness
 # ---------------------------------------------------------------------------
@@ -133,20 +185,36 @@ _studioCache: tuple = (0.0, None)
 _windowCache: tuple = (0.0, None)
 
 
+STUDIO_IMAGE_WINDOWS = "RobloxStudioBeta.exe"
+
+
 def studioRunning() -> bool:
     try:
+        if sys.platform == "win32":
+            out = subprocess.run(
+                ["tasklist", "/FI", f"IMAGENAME eq {STUDIO_IMAGE_WINDOWS}", "/NH", "/FO", "CSV"],
+                capture_output=True, text=True, timeout=5,
+            )
+            # "INFO: No tasks are running…" (localized) when absent; the image name only when present
+            return out.returncode != 0 or STUDIO_IMAGE_WINDOWS.lower() in out.stdout.lower()
         return subprocess.run(["pgrep", "-xi", "RobloxStudio"], capture_output=True, timeout=3).returncode == 0
     except (OSError, subprocess.SubprocessError):
         return True  # cannot tell — assume running, the safe direction
 
 
+def _studioWindowEntries(titles: list) -> list:
+    """Studio marks a place with unsaved edits with a trailing asterisk (UNVERIFIED against a live Studio)."""
+    titles = [t.strip() for t in titles if t.strip()]
+    return [{"title": t, "unsaved": bool(re.search(r"\*\s*(-|$)", t))} for t in titles]
+
+
 def studioWindows() -> Optional[list]:
     """Titles of open Roblox Studio windows, or None if we cannot see them.
 
-    Best effort, macOS only: reads window titles through System Events, which needs
-    the Accessibility permission. Studio marks a place with unsaved edits with a
-    trailing asterisk (UNVERIFIED against a live Studio). A failed probe is retried
-    slowly so a pending permission prompt cannot stall every poll.
+    Best effort. macOS reads window titles through System Events, which needs the
+    Accessibility permission; Windows asks PowerShell for each Studio process's main
+    window title (every open place is its own process there). A failed probe is
+    retried slowly so a pending permission prompt cannot stall every poll.
     """
     global _windowCache
     if not studioRunning():
@@ -163,8 +231,21 @@ def studioWindows() -> Optional[list]:
         try:
             out = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=3)
             if out.returncode == 0:
-                titles = [t.strip() for t in out.stdout.strip().split(", ") if t.strip()]
-                result = [{"title": t, "unsaved": bool(re.search(r"\*\s*(-|$)", t))} for t in titles]
+                result = _studioWindowEntries(out.stdout.strip().split(", "))
+        except (OSError, subprocess.SubprocessError):
+            result = None
+    elif sys.platform == "win32":
+        script = (
+            f"Get-Process {STUDIO_IMAGE_WINDOWS[:-4]} -ErrorAction SilentlyContinue"
+            " | Where-Object MainWindowTitle | ForEach-Object MainWindowTitle"
+        )
+        try:
+            out = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=8,
+            )
+            if out.returncode == 0:
+                result = _studioWindowEntries(out.stdout.splitlines())
         except (OSError, subprocess.SubprocessError):
             result = None
     _windowCache = (time.time(), result)
@@ -195,7 +276,6 @@ class Project:
         self.proc: Optional[subprocess.Popen] = None
         self.runId = 0
         self.done = True  # no run in flight
-        self.sawVersion: Optional[int] = None
         # `sgfl save` runs beside a serve (that is the normal loop), so it has its own
         # process state rather than sharing the start/serve slot above.
         self.saveProc: Optional[subprocess.Popen] = None
@@ -209,6 +289,11 @@ class Project:
         self.stage = -1
         self.listening = False
         self.stopRequested = False
+        self.restarted = False  # this run is an automatic restart of a serve that died
+        self.restartPending = False  # serve died; a restart is scheduled but not spawned
+        self.restarts: list = []  # times of recent automatic restarts (the crash-loop budget)
+        self.restartNote = ""
+        self.studioWaitUntil = 0.0  # epoch seconds this start's Studio launch is held until
         self.port: Optional[int] = None
         self.detail = ""
         self.failure: list = []
@@ -251,6 +336,11 @@ class Project:
             if published and self.kind == "start":
                 # Start just made Roblox match the repo at this version.
                 _recordVersion(self.path, int(published.group(1)))
+            waiting = _STUDIO_WAIT.search(lowered)
+            if waiting:
+                self.studioWaitUntil = time.time() + int(waiting.group(1))
+            elif _STUDIO_OPENING.search(lowered):
+                self.studioWaitUntil = 0.0
             if self.kind in ("start", "serve") and not self.listening:
                 if _SERVING.search(lowered):
                     self.listening = True
@@ -267,6 +357,7 @@ class Project:
 
     def _wait(self, runId: int, proc: subprocess.Popen, pump: threading.Thread) -> None:
         code = proc.wait()
+        _reaper.untrack(proc.pid)
         # A grandchild (editor, `open`) can hold the pipe open; do not wait on it forever.
         pump.join(timeout=2)
         self._finish(runId, code)
@@ -275,6 +366,12 @@ class Project:
         with self.lock:
             if runId != self.runId:
                 return
+            # A serve that dies on its own (rojo crashing on a project-file edit, a wally
+            # install underneath it) comes back on the same port, so Studio's Rojo plugin
+            # just reconnects. A run that never served is a build failure: no retry.
+            wasServing = self.listening or self.restarted
+            if not self.stopRequested and wasServing and self._scheduleRestart(runId, code):
+                return
             now = time.time()
             if self.stopRequested:
                 self.last = {"kind": self.kind, "ok": True, "text": "Stopped", "at": now}
@@ -282,6 +379,11 @@ class Project:
                 self.last = {"kind": self.kind, "ok": True, "text": "Exited", "at": now}
             else:
                 self.failure = self._failureLines()
+                if wasServing:
+                    self.failure.append(
+                        f"rojo serve kept exiting; gave up after {len(RESTART_DELAYS)} restarts "
+                        f"in {RESTART_WINDOW_SECONDS // 60} min"
+                    )
                 self.last = {
                     "kind": self.kind,
                     "ok": False,
@@ -291,6 +393,31 @@ class Project:
             self.listening = False
             self._releasePort()
             self.done = True
+
+    def _scheduleRestart(self, runId: int, code: int) -> bool:
+        """Caller holds self.lock. False once the restart budget is spent (a crash loop)."""
+        now = time.time()
+        self.restarts = [t for t in self.restarts if now - t < RESTART_WINDOW_SECONDS]
+        if len(self.restarts) >= len(RESTART_DELAYS) or self.port is None:
+            return False
+        delay = RESTART_DELAYS[len(self.restarts)]
+        self.restarts.append(now)
+        self.kind = "serve"  # whatever ran before, what comes back is plain rojo
+        self.listening = False
+        self.restartPending = True
+        self.restartNote = f"rojo serve exited (code {code}); restarting in {delay}s"
+        self.log.append(f"WARN {self.restartNote}")
+        threading.Thread(target=self._restart, args=(runId, self.port, delay), daemon=True).start()
+        return True
+
+    def _restart(self, runId: int, port: int, delay: float) -> None:
+        time.sleep(delay)
+        with self.lock:
+            if runId != self.runId or not self.restartPending:
+                return  # stopped (or replaced) while we waited
+            self.restartPending = False
+            # Same port, still claimed: Studio's plugin is pointed at it.
+            self._spawn("serve", ["rojo", "serve", "--port", str(port)], restarted=True)
 
     def _failureLines(self) -> list:
         lines = [l for l in self.log if l.strip()]
@@ -317,31 +444,46 @@ class Project:
                 del _claimedPorts[port]
         self.port = None
 
-    def _spawn(self, kind: str, args: list) -> None:
+    def _popen(self, args: list, reap: bool = True) -> subprocess.Popen:
+        """reap=False for `sgfl save`: it ends on its own, and killing one mid-write is worse
+        than letting it finish after the dashboard is gone."""
+        proc = subprocess.Popen(
+            args,
+            cwd=self.path,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            # Explicit, not the locale's: on Windows that is cp1252, which cannot decode
+            # sgfl's output, and a decode error kills the pump and then blocks the child.
+            encoding="utf-8",
+            errors="replace",
+            env={**os.environ, "NO_COLOR": "1", "PYTHONUNBUFFERED": "1", "PYTHONUTF8": "1"},
+            **proctree.popenKwargs(),  # root of its own tree, so Stop also reaches rojo
+        )
+        if reap:
+            _reaper.track(proc.pid)
+        return proc
+
+    def _spawn(self, kind: str, args: list, restarted: bool = False) -> None:
         """Caller holds self.lock and has checked that nothing is running."""
         self.runId += 1
         runId = self.runId
         self.kind = kind
+        self.restarted = restarted
+        if not restarted:  # a run the user asked for gets a fresh restart budget
+            self.restarts = []
+            self.restartNote = ""
         self.startedAt = time.time()
         self.stage = 0 if kind == "start" else -1
         self.listening = False
         self.stopRequested = False
+        self.studioWaitUntil = 0.0
         self.failure = []
         self.detail = ""
-        self.sawVersion = None
         self.last = None if self.last and not self.last["ok"] else self.last
         self.log.append(f"$ {' '.join('sgfl' if a == sys.executable else a for a in args)}")
         try:
-            self.proc = subprocess.Popen(
-                args,
-                cwd=self.path,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                start_new_session=True,  # own process group, so Stop also reaches rojo
-                env={**os.environ, "NO_COLOR": "1", "PYTHONUNBUFFERED": "1"},
-            )
+            self.proc = self._popen(args)
         except OSError as err:
             hint = " (is rojo on the PATH of the shell that launched `sgfl ui`?)" if args[0] == "rojo" else ""
             self.failure = [f"Could not launch {args[0]}: {err}{hint}"]
@@ -390,16 +532,7 @@ class Project:
                 self.last, self.failure = None, []
             self.log.append("$ sgfl save")
             try:
-                self.saveProc = subprocess.Popen(
-                    [sys.executable, "-m", "sgfl.cli", "save"],
-                    cwd=self.path,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    start_new_session=True,
-                    env={**os.environ, "NO_COLOR": "1", "PYTHONUNBUFFERED": "1"},
-                )
+                self.saveProc = self._popen([sys.executable, "-m", "sgfl.cli", "save"], reap=False)
             except OSError as err:
                 self.failure = [f"Could not launch sgfl save: {err}"]
                 self.last = {"kind": "save", "ok": False, "text": self.failure[0], "at": time.time()}
@@ -446,32 +579,32 @@ class Project:
             self.saveDone = True
 
     def stop(self) -> None:
-        """Ask nicely first (SIGINT lets sgfl's `finally` blocks run), then escalate."""
+        """Ask nicely first (an interrupt lets sgfl's `finally` blocks run), then escalate."""
         with self.lock:
-            if not self.running() or self.proc is None:
+            if not self.running():
                 return
             self.stopRequested = True
+            if self.restartPending:  # nothing alive yet; just call off the restart
+                self.restartPending = False
+                self.runId += 1
+                self.last = {"kind": self.kind, "ok": True, "text": "Stopped", "at": time.time()}
+                self._releasePort()
+                self.done = True
+                return
+            if self.proc is None:
+                return
             runId, proc = self.runId, self.proc
-        self._signal(proc, signal.SIGINT)
+        polite = proctree.interrupt(proc.pid)
 
         def escalate():
-            for sig, wait in ((signal.SIGTERM, 8), (signal.SIGKILL, 5)):
+            # Undeliverable interrupt (Windows without a shared console): no point waiting on it.
+            for stop, wait in ((proctree.terminate, 8 if polite else 0), (proctree.kill, 5)):
                 time.sleep(wait)
                 if self.runId != runId or self.done:
                     return
-                self._signal(proc, sig)
+                stop(proc.pid)
 
         threading.Thread(target=escalate, daemon=True).start()
-
-    @staticmethod
-    def _signal(proc: subprocess.Popen, sig: int) -> None:
-        try:
-            os.killpg(proc.pid, sig)
-        except OSError:
-            try:
-                proc.send_signal(sig)
-            except OSError:
-                pass
 
     def cancelIsRisky(self) -> bool:
         """Between the base upload and the final publish the place holds a script-only skeleton."""
@@ -563,10 +696,6 @@ class Project:
             return True
         return None
 
-    def phase(self) -> str:
-        with self.lock:
-            return self._phase()
-
     def _phase(self) -> str:
         if self.running():
             return "serving" if self.listening else "starting"
@@ -576,9 +705,9 @@ class Project:
             return "failed"
         return "idle"
 
-    def status(self, snapshot: dict) -> dict:
+    def status(self, snapshot: dict, saveState: dict) -> dict:
         latest = self.latestVersion()
-        saved = _readJson(STATE_PATH).get(self.path)
+        saved = saveState.get(self.path)
         if latest is None:
             sync = "unknown"
         elif saved is None:
@@ -593,6 +722,9 @@ class Project:
             saving, saveStartedAt, saveDetail = self.saving(), self.saveStartedAt, self.saveDetail
             log, failure, last = list(self.log)[-120:], list(self.failure), self.last and dict(self.last)
             detail, port, startedAt = self.detail, self.port, self.startedAt
+            restarting = phase == "starting" and (self.restartPending or self.restarted)
+            restartNote = self.restartNote
+            studioWaitUntil = self.studioWaitUntil if phase == "starting" and self.studioWaitUntil > time.time() else None
         stages = []
         failedStart = phase == "failed" and last and last["kind"] == "start"
         if (kind == "start" and phase == "starting") or failedStart:  # the rail is for in-flight and broken runs; a finished one just serves
@@ -616,6 +748,8 @@ class Project:
             "startedAt": (saveStartedAt if phase == "saving" else startedAt) if phase in ("starting", "serving", "saving") else None,
             "port": port if phase in ("starting", "serving") else None,
             "cancelRisky": self.cancelIsRisky(),
+            "restarting": restartNote if restarting else None,
+            "studioWaitUntil": studioWaitUntil,
             "defaultPort": self.configuredPort(),
             "stages": stages,
             "detail": saveDetail if phase == "saving" else (detail if phase == "starting" else ""),
@@ -754,7 +888,8 @@ class Registry:
         pinned = set(self.config.get("pinned", []))
         with self.lock:
             projects = list(self.projects.values())
-        shown = [dict(p.status(snapshot), pinned=p.path in pinned) for p in projects if p.path not in hidden]
+        saveState = _readJson(STATE_PATH)
+        shown = [dict(p.status(snapshot, saveState), pinned=p.path in pinned) for p in projects if p.path not in hidden]
         shown.sort(key=lambda x: (not x["pinned"], x["name"].lower()))  # pinned first, stable by name
         return {
             "projects": shown,
@@ -762,12 +897,33 @@ class Registry:
             "roots": self.roots(),
             "configuredRoots": self.config.get("roots", []),
             "studio": snapshot,
-            "canPick": sys.platform == "darwin",
+            "canPick": sys.platform in ("darwin", "win32"),
+            "windows": sys.platform == "win32",
         }
 
 
 def pickFolder() -> Optional[str]:
-    """Native folder chooser (macOS). Returns None if cancelled or unavailable."""
+    """Native folder chooser (macOS, Windows). Returns None if cancelled or unavailable."""
+    if sys.platform == "win32":
+        script = (
+            "Add-Type -AssemblyName System.Windows.Forms;"
+            "$owner=New-Object System.Windows.Forms.Form -Property @{TopMost=$true};"  # in front of the browser
+            "$d=New-Object System.Windows.Forms.FolderBrowserDialog;"
+            "$d.Description='Folder to scan for sgfl projects';"
+            "if($d.ShowDialog($owner) -eq 'OK'){$d.SelectedPath}"
+        )
+        try:
+            out = subprocess.run(
+                ["powershell", "-NoProfile", "-STA", "-Command", script],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if out.returncode != 0:
+            return None
+        # No trailing-separator strip here: a drive root without its backslash ("C:")
+        # means "the current folder on C:", not the root.
+        return out.stdout.strip() or None
     if sys.platform != "darwin":
         return None
     try:
@@ -857,7 +1013,6 @@ header{display:flex;align-items:center;justify-content:space-between;gap:12px;ma
 .rail li[data-state=failed]{color:var(--bad);font-weight:600}
 @keyframes slide{to{background-position:-200% 0}}
 
-.fail{margin:14px 0 0;padding:10px 12px;border-radius:8px;background:var(--bad-soft);color:var(--bad);font:12px/1.5 var(--mono);white-space:pre-wrap;word-break:break-word}
 .confirm{flex:1;min-height:56px;padding:6px 14px;border-radius:9px;background:var(--warn-soft);display:flex;gap:10px 16px;align-items:center;justify-content:space-between}
 .confirm p{margin:0;font-size:13px;line-height:1.35}
 .confirm .btns{display:flex;gap:8px}
@@ -883,6 +1038,7 @@ header{display:flex;align-items:center;justify-content:space-between;gap:12px;ma
 .disclosure>summary::-webkit-details-marker{display:none}
 .disclosure>summary::before{content:"";width:6px;height:6px;border-right:1.6px solid currentColor;border-bottom:1.6px solid currentColor;transform:rotate(-45deg);transition:transform .15s}
 .disclosure[open]>summary::before{transform:rotate(45deg)}
+.lv.info{color:oklch(78% .11 200)}.lv.warn{color:oklch(85% .13 90)}.lv.error{color:oklch(72% .16 25)}.lv.success{color:oklch(78% .14 150)}.lv.cmd{color:oklch(66% .02 255)}
 pre{background:var(--log-bg);color:var(--log-fg);padding:12px 14px;border-radius:8px;max-height:240px;overflow:auto;font:12px/1.55 var(--mono);margin:8px 0 0;white-space:pre-wrap;word-break:break-word;scrollbar-color:var(--line-strong) transparent}
 .hr{display:flex;align-items:center;gap:6px}
 .icon{width:32px;height:32px;display:inline-grid;place-items:center;border:0;border-radius:8px;background:transparent;color:var(--mut)}
@@ -890,6 +1046,12 @@ pre{background:var(--log-bg);color:var(--log-fg);padding:12px 14px;border-radius
 .icon.on{color:var(--warn)}.icon.on svg{fill:currentColor}
 .icon:disabled{opacity:.35;cursor:not-allowed}
 .hidden-list{margin-top:14px}
+.btn.attn:not(.primary){border-color:var(--accent)}
+.btn.attn:not(.primary) .t{color:var(--accent)}
+.banner{margin:0 0 14px;padding:10px 14px;border-radius:9px;background:var(--bad-soft);color:var(--bad);font-size:13px}
+.banner[hidden]{display:none}
+.banner code{font:12px var(--mono)}
+body.offline #app{opacity:.5;pointer-events:none}
 
 .panel{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:18px 22px;margin-bottom:14px}
 .panel h2{font-size:14px;margin:0 0 4px}
@@ -911,6 +1073,7 @@ pre{background:var(--log-bg);color:var(--log-fg);padding:12px 14px;border-radius
   <div class="tools"><span class="studio-state" id="studio"></span>
   <button class="link" data-act="folders" data-key="folders"><svg viewBox="0 0 16 16"><path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h2.8l1.4 1.5h4.8A1.5 1.5 0 0 1 14 6v5.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5z"/></svg>Folders</button></div>
 </header>
+<div id="offline" class="banner" role="alert" hidden>Lost connection to sgfl ui. It was stopped or its terminal was closed. Run <code>sgfl ui</code> again; anything it was serving has stopped.</div>
 <div id="folders"></div>
 <div id="app"></div>
 <div class="sr" role="status" aria-live="polite" id="live"></div>
@@ -938,11 +1101,13 @@ async function post(path,body){
   const r=await fetch(path,{method:"POST",headers:{"X-Token":TOKEN,"Content-Type":"application/json"},body:JSON.stringify(body||{})});
   return r.json().catch(()=>({}));
 }
-async function act(path,action){await post("/api/action",{path,action});await poll()}
+async function act(path,action){if(offline)return;await post("/api/action",{path,action});await poll()}
 
 function lines(p){
   const clock=`<span data-since="${p.startedAt}"></span>`;
   if(p.saving&&p.phase==="serving")return ["Saving from Roblox into the repo",`<span data-since="${p.saveStartedAt}"></span>${p.detail?" · "+esc(p.detail):""} · still serving on port <span class=mono>${p.port}</span>`];
+  if(p.phase==="starting"&&p.restarting)return [`Restarting Rojo on port <span class=mono>${p.port}</span>`,esc(p.restarting)];
+  if(p.phase==="starting"&&p.studioWaitUntil)return ["Starting: waiting for your other Studio",`${clock} · Opening Studio in <span data-until="${p.studioWaitUntil}"></span>, once the other one has finished signing in`];
   if(p.phase==="starting"){
     const cur=p.stages.find(x=>x.state==="active");
     const tail=cur&&cur.key==="apply"?"applying assets in Roblox, usually 1 to 3 min":(p.detail||"working");
@@ -959,6 +1124,12 @@ function lines(p){
   if(p.sync==="in-sync")return [`Repo matches Roblox (v${p.cloudVersion})`,p.last&&p.last.ok?`${esc(p.last.text)}, ${ago(p.last.at)}`:"Nothing to save"];
   if(p.sync==="never-saved")return ["No save recorded yet",`Roblox is at v${p.cloudVersion}`];
   return ["Can't read the place version","Needs PLACE_ID in .env and a DOWNLOAD_KEY with Assets read"];
+}
+// Children run with NO_COLOR, so colour the level words here the way the CLI does.
+function logLine(l){
+  const m=/^(\s*)(INFO|WARN|ERROR|SUCCESS)\b(.*)$/.exec(l);
+  if(m)return `${m[1]}<b class="lv ${m[2].toLowerCase()}">${m[2]}</b>${esc(m[3])}`;
+  return l.startsWith("$ ")?`<span class="lv cmd">${esc(l)}</span>`:esc(l);
 }
 function sentence(p){const [a,b]=lines(p);return `<span class=l1>${a}</span><span class=l2>${b}</span>`}
 const stateLabel=p=>({idle:"Idle",starting:"Starting",serving:"Serving",saving:"Saving",failed:"Failed"}[p.phase]);
@@ -1012,12 +1183,12 @@ function row(p){
    <div class=actions>${strip||`
     <div class=group role=group aria-label="Sync with Roblox">
      <button class="btn primary" data-act=start data-path="${path}" data-key="start:${path}" ${running?"disabled":""}><span class=t>${I.play}Start</span><span class=s>${startSub}</span></button>
-     <button class=btn data-act=save data-path="${path}" data-key="save:${path}" ${saveBusy?"disabled":""}><span class=t>${I.save}Save</span><span class=s>${p.saving?"saving…":"Roblox → repo"}</span></button>
+     <button class="btn${p.sync==="behind"&&!p.saving?" attn":""}" data-act=save data-path="${path}" data-key="save:${path}" ${saveBusy?"disabled":""}><span class=t>${I.save}Save</span><span class=s>${p.saving?"saving…":"Roblox → repo"}</span></button>
     </div>
     <div class=group role=group aria-label="Rojo server">${serveToggle}</div>`}
    </div>
    <details class=disclosure data-log="${path}" ${ui.logOpen.get(p.path)?"open":""}><summary>Log${p.log.length?` (${p.log.length})`:""}</summary>
-    <pre>${esc(p.log.join("\n")||"Nothing yet.")}</pre></details>
+    <pre>${p.log.length?p.log.map(logLine).join("\n"):"Nothing yet."}</pre></details>
   </article>`;
 }
 function studioText(s){
@@ -1036,7 +1207,7 @@ function foldersPanel(){
    <p class=hint>sgfl looks in these folders, up to three levels deep, for projects with an assets.json and default.project.json. Add the folder your games live in, then rescan.</p>
    <ul class=roots>${roots.map(r=>`<li><span class=mono>${esc(r)}</span><button class=link data-act=removeRoot data-path="${esc(r)}" data-key="rm:${esc(r)}">Remove</button></li>`).join("")||`<li class=mono>None yet</li>`}
    ${extra.map(r=>`<li><span class=mono>${esc(r)}</span><span class=hint style="margin:0">this run only</span></li>`).join("")}</ul>
-   <div class=add><input id=rootInput data-key=rootInput placeholder="/Users/you/Documents/Code" aria-label="Folder path" spellcheck=false>
+   <div class=add><input id=rootInput data-key=rootInput placeholder="${data.windows?"C:\\Users\\you\\Documents\\Code":"/Users/you/Documents/Code"}" aria-label="Folder path" spellcheck=false>
     <button class="btn quiet" data-act=addRoot data-key=addRoot>Add</button>
     ${data.canPick?`<button class="btn quiet" data-act=pick data-key=pick>Choose…</button>`:""}
     <button class="btn quiet" data-act=rescan data-key=rescan>Rescan</button></div>
@@ -1062,7 +1233,10 @@ function render(){
   if(active){const el=document.querySelector(`[data-key="${CSS.escape(active)}"]`);if(el&&el!==document.activeElement)el.focus()}
   tickClocks();
 }
-function tickClocks(){document.querySelectorAll("[data-since]").forEach(e=>{e.textContent=fmtClock(Date.now()/1000-parseFloat(e.dataset.since))})}
+function tickClocks(){
+  document.querySelectorAll("[data-since]").forEach(e=>{e.textContent=fmtClock(Date.now()/1000-parseFloat(e.dataset.since))});
+  document.querySelectorAll("[data-until]").forEach(e=>{e.textContent=Math.max(0,Math.ceil(parseFloat(e.dataset.until)-Date.now()/1000))+"s"});
+}
 const announced={};
 function announce(){
   for(const p of data.projects){
@@ -1071,7 +1245,19 @@ function announce(){
     announced[p.path]=k;
   }
 }
-async function poll(){try{data=await (await fetch("/api/status")).json();announce();render()}catch(e){}}
+let offline=false;
+function setTitle(){
+  const n=(f)=>data.projects.filter(f).length,parts=[];
+  if(n(p=>p.phase==="failed"))parts.push(n(p=>p.phase==="failed")+" failed");
+  if(n(p=>p.phase==="starting"||p.saving))parts.push("working");
+  if(n(p=>p.phase==="serving"))parts.push(n(p=>p.phase==="serving")+" serving");
+  document.title=parts.length?"sgfl · "+parts.join(", "):"sgfl";
+}
+async function poll(){
+  try{data=await (await fetch("/api/status")).json();offline=false;announce();render();setTitle()}
+  catch(e){offline=true}
+  document.body.classList.toggle("offline",offline);$("#offline").hidden=!offline;
+}
 document.addEventListener("click",async e=>{
   const b=e.target.closest("[data-act]");if(!b||b.disabled)return;
   const path=b.dataset.path,a=b.dataset.act;
@@ -1097,7 +1283,9 @@ document.addEventListener("click",async e=>{
 document.addEventListener("keydown",e=>{if(e.key==="Escape"&&ui.folders){ui.folders=false;lastFolders=null;render();$("[data-act=folders]").focus()}
   if(e.key==="Enter"&&e.target.id==="rootInput")document.querySelector("[data-act=addRoot]").click()});
 document.addEventListener("toggle",e=>{const d=e.target;if(d.dataset&&"hidden" in d.dataset)ui.hiddenOpen=d.open;if(d.dataset&&d.dataset.log)ui.logOpen.set(d.dataset.log,d.open)},true);
-poll();setInterval(poll,1500);setInterval(tickClocks,1000);
+(function loop(){poll().finally(()=>setTimeout(loop,document.hidden?6000:1500))})();
+document.addEventListener("visibilitychange",()=>{if(!document.hidden)poll()});
+setInterval(tickClocks,1000);
 </script></body></html>"""
 
 
@@ -1105,7 +1293,25 @@ poll();setInterval(poll,1500);setInterval(tickClocks,1000);
 # server
 # ---------------------------------------------------------------------------
 
-def runDashboard(extraRoots: list, port: int) -> None:
+def _isDashboard(port: int) -> bool:
+    """True if what is listening on the port is an sgfl dashboard (not some other server)."""
+    try:
+        response = requests.get(f"http://127.0.0.1:{port}/api/status", timeout=1.5)
+        return response.status_code == 200 and "projects" in response.json()
+    except (requests.RequestException, ValueError):
+        return False
+
+
+class _QuietServer(ThreadingHTTPServer):
+    def handle_error(self, request, client_address):
+        # A tab closed or reloaded mid-poll drops the socket before the reply is written.
+        # That is normal browser behaviour, not a dashboard fault: no traceback.
+        if isinstance(sys.exc_info()[1], ConnectionError):
+            return
+        super().handle_error(request, client_address)
+
+
+def runDashboard(extraRoots: list, port: int, openBrowser: bool = True) -> None:
     registry = Registry(extraRoots)
     token = secrets.token_urlsafe(16)
 
@@ -1200,27 +1406,44 @@ def runDashboard(extraRoots: list, port: int) -> None:
                 return self._json({"path": pickFolder()})
             self._json({}, 404)
 
+    url = f"http://127.0.0.1:{port}"
     try:
-        server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+        server = _QuietServer(("127.0.0.1", port), Handler)
     except OSError as err:
-        print(f"Could not start the dashboard on port {port}: {err}. Is another `sgfl ui` already running? Try --port.", file=sys.stderr)
+        if _isDashboard(port):
+            # Launching twice should take you to the one that is running, not fail.
+            print(f"{color.BOLD}{color.CYAN}sgfl ui{color.END} is already running at {color.CYAN}{url}{color.END}", flush=True)
+            if openBrowser:
+                webbrowser.open(url)
+            return
+        print(f"Could not start the dashboard on port {port}: {err}. Something else is using it; try --port.", file=sys.stderr)
         raise SystemExit(1)
-    print(f"sgfl dashboard: http://127.0.0.1:{port}  (Ctrl+C stops it and every process it started)", flush=True)
-    for p in registry.projects.values():
-        print(f"  - {p.path}", flush=True)
-    if not registry.projects:
-        print("  (no projects found; add a folder from the Folders button)", flush=True)
+    print(f"{color.BOLD}{color.CYAN}sgfl ui{color.END}  {color.CYAN}{url}{color.END}", flush=True)
+    if openBrowser:
+        webbrowser.open(url)
 
-    # SIGTERM (pkill, a closing terminal) must stop the children too: they run in
-    # their own sessions, so without this they are orphaned and keep their ports.
+    # Children run in their own sessions, so nothing reaches them unless we pass it on.
+    # SIGTERM (pkill) and SIGHUP (the terminal window closing) shut down cleanly here;
+    # the reaper covers what no handler can (SIGKILL, a crash).
+    _reaper.start()
+
     def _terminate(*_):
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGTERM, _terminate)
+    for name in ("SIGHUP", "SIGBREAK"):  # terminal closing (POSIX) / Ctrl+Break (Windows)
+        if hasattr(signal, name):
+            signal.signal(getattr(signal, name), _terminate)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
-        for p in list(registry.projects.values()):
+        projects = list(registry.projects.values())
+        for p in projects:
             p.stop()
+        # Stop's own escalation runs on daemon threads that die with us; wait out the
+        # polite part here, and leave anything still alive after that to the reaper.
+        deadline = time.time() + 10
+        while time.time() < deadline and any(p.running() for p in projects):
+            time.sleep(0.2)

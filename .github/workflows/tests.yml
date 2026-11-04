@@ -7,10 +7,17 @@ on:
 
 jobs:
   pytest:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         python-version: ["3.9", "3.13"]
+        include:
+          # Stuart runs sgfl on Windows: process trees, Ctrl+Break and the launch lock
+          # all take Windows-only paths that only a Windows runner exercises for real.
+          - os: windows-latest
+            python-version: "3.13"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
