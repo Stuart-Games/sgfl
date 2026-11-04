@@ -30,7 +30,11 @@ if hasattr(signal, "SIGBREAK"):
     signal.signal(signal.SIGBREAK, signal.default_int_handler)  # what sgfl/cli.py installs
 try:
     print("ready", flush=True)
-    time.sleep(120)
+    # Short slices: on Windows only Ctrl+C wakes time.sleep, so a Ctrl+Break
+    # handler runs at the next bytecode. (In sgfl, rojo exits on the same
+    # event, which is what returns sgfl's wait.)
+    for _ in range(1200):
+        time.sleep(0.1)
 finally:
     open(sys.argv[1], "w").write("cleaned up")
 """
