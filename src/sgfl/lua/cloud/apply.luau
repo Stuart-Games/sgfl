@@ -1021,6 +1021,51 @@ for _, entry in CONFIG.entries do
 end
 
 ------------------------------------------------------------------------------
+-- Engine-owned default PlayerModule
+------------------------------------------------------------------------------
+
+-- StarterPlayer.CreateDefaultPlayerModule (default true) makes StarterPlayer
+-- the engine's injection point for the default PlayerModule: every load of the
+-- place adds a fresh copy directly under StarterPlayer, even when one is
+-- already there, and that copy is Archivable. Projection never saves it (see
+-- isEngineInjected in projection.luau), but an entry file written before that
+-- rule still carries one — applying it would persist a copy for the next load
+-- to inject a second beside, which is how places accumulated PlayerModules.
+-- So when StarterPlayer is a managed entry root and the flag is on, the saved
+-- place holds none: whatever the engine injects at load is the only copy.
+local function engineOwnsPlayerModule(starterPlayer: Instance): boolean
+	-- an unwritable value is routed to the binary patch; that is the one the
+	-- saved place will carry, so it wins over the session's stale value
+	for _, patch in patchProps do
+		if patch.className == "StarterPlayer" and patch.prop == "CreateDefaultPlayerModule" then
+			return patch.value == true
+		end
+	end
+	local okRead, value = pcall(function()
+		return (starterPlayer :: any).CreateDefaultPlayerModule
+	end)
+	return okRead and value == true
+end
+
+do
+	local starterPlayer = game:GetService("StarterPlayer")
+	local managed = false
+	for _, root in entryRoots do
+		if root == starterPlayer then
+			managed = true
+			break
+		end
+	end
+	if managed and not rojoExcluded["StarterPlayer/PlayerModule"] and engineOwnsPlayerModule(starterPlayer) then
+		for _, child in starterPlayer:GetChildren() do
+			if child.Name == "PlayerModule" then
+				child:Destroy()
+			end
+		end
+	end
+end
+
+------------------------------------------------------------------------------
 -- Pass 2: refs
 ------------------------------------------------------------------------------
 
